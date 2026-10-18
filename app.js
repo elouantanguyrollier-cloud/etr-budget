@@ -60,7 +60,144 @@ function save() {
   } catch (e) {
     toast('⚠️ Impossible d’enregistrer sur cet appareil');
   }
+  snapshotDaily();
+  scheduleCloudBackup();
 }
+
+/* ---------------- Sauvegardes automatiques ----------------
+   1. Sur le téléphone : une copie par jour, 30 jours gardés.
+   2. Dans le cloud : chaque modification est envoyée (quelques secondes après)
+      dans un dépôt GitHub privé. Chaque envoi = une version dans l'historique du dépôt. */
+
+const SNAP_KEY = 'etr-budget-snapshots';
+const CLOUD_KEY = 'etr-budget-cloud'; // jeton + état, jamais inclus dans les sauvegardes
+const CLOUD_FILE = 'sauvegarde.json';
+
+function readJSON(k, fallback) {
+  try { return JSON.parse(localStorage.getItem(k)) ?? fallback; } catch (e) { return fallback; }
+}
+function writeJSON(k, v) {
+  try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { /* plein ou indisponible */ }
+}
+
+function snapshotDaily() {
+  const snaps = readJSON(SNAP_KEY, []);
+  const today = todayISO();
+  const entry = { date: today, at: new Date().toISOString(), data: state };
+  if (snaps.length && snaps[0].date === today) snaps[0] = entry;
+  else snaps.unshift(entry);
+  writeJSON(SNAP_KEY, snaps.slice(0, 30));
+}
+
+let cloud = readJSON(CLOUD_KEY, {});
+let cloudTimer;
+let cloudBusy = false;
+
+const saveCloud = () => writeJSON(CLOUD_KEY, cloud);
+const cloudReady = () => !!(cloud.token && cloud.repo);
+
+function scheduleCloudBackup() {
+  if (!cloudReady()) return;
+  cloud.dirty = true; saveCloud();
+  clearTimeout(cloudTimer);
+  cloudTimer = setTimeout(cloudBackup, 4000);
+}
+
+function b64encode(str) {
+  const bytes = new TextEncoder().encode(str);
+  let bin = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  return btoa(bin);
+}
+function b64decode(b64) {
+  const bin = atob(b64.replace(/\s/g, ''));
+  return new TextDecoder().decode(Uint8Array.from(bin, (ch) => ch.charCodeAt(0)));
+}
+
+async function gh(path, opts = {}) {
+  const res = await fetch(`https://api.github.com/repos/${cloud.repo}/contents/${path}`, {
+    ...opts,
+    headers: { Authorization: `Bearer ${cloud.token}`, Accept: 'application/vnd.github+json', ...(opts.headers || {}) },
+    cache: 'no-store',
+  });
+  return res;
+}
+
+async function cloudBackup(manual = false) {
+  if (!cloudReady() || cloudBusy) return;
+  if (!navigator.onLine) { cloud.status = 'offline'; saveCloud(); return; }
+  cloudBusy = true;
+  try {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      if (!cloud.sha) {
+        const r = await gh(CLOUD_FILE);
+        if (r.ok) cloud.sha = (await r.json()).sha;
+        else if (r.status !== 404) throw r;
+      }
+      const body = { message: `Sauvegarde ${new Date().toLocaleString('fr-FR')}`, content: b64encode(JSON.stringify(state, null, 1)) };
+      if (cloud.sha) body.sha = cloud.sha;
+      const r = await gh(CLOUD_FILE, { method: 'PUT', body: JSON.stringify(body) });
+      if (r.ok) {
+        cloud.sha = (await r.json()).content.sha;
+        cloud.last = new Date().toISOString();
+        cloud.status = 'ok'; cloud.dirty = false;
+        saveCloud();
+        if (manual) toast('☁️ Sauvegardé dans le cloud');
+        break;
+      }
+      if (r.status === 409 || r.status === 422) { cloud.sha = null; continue; } // version changée : on recommence
+      throw r;
+    }
+  } catch (e) {
+    cloud.status = e && e.status === 401 ? 'auth' : e && e.status === 404 ? 'repo' : e && e.status === 403 ? 'auth' : 'error';
+    saveCloud();
+    if (manual) toast(cloudStatusText());
+  } finally {
+    cloudBusy = false;
+    if (ui.tab === 'settings' && $sheet.hidden) render();
+  }
+}
+
+async function cloudRestore() {
+  const r = await gh(CLOUD_FILE);
+  if (!r.ok) { toast(r.status === 404 ? 'Aucune sauvegarde dans le cloud pour l’instant' : 'Connexion au cloud impossible'); return; }
+  const file = await r.json();
+  const data = JSON.parse(b64decode(file.content));
+  confirmSheet('Restaurer depuis le cloud ?', `Sauvegarde avec ${data.transactions.length} opérations. Tes données actuelles seront remplacées.`, 'Restaurer', () => {
+    state = Object.assign(freshState(), data);
+    cloud.sha = file.sha;
+    save(); render();
+    toast('✓ Données restaurées');
+  });
+}
+
+function cloudStatusText() {
+  if (!cloudReady()) return 'Non activée';
+  switch (cloud.status) {
+    case 'ok': return `✓ Dernière sauvegarde ${timeAgo(cloud.last)}`;
+    case 'auth': return '⚠️ Jeton refusé ou expiré : recrée-en un';
+    case 'repo': return '⚠️ Dépôt introuvable : vérifie son nom';
+    case 'offline': return 'Hors ligne : envoi dès le retour du réseau';
+    case 'error': return '⚠️ Échec du dernier envoi, nouvel essai bientôt';
+    default: return 'En attente du premier envoi…';
+  }
+}
+
+function timeAgo(iso) {
+  if (!iso) return '';
+  const min = Math.round((Date.now() - new Date(iso)) / 60000);
+  if (min < 1) return "à l'instant";
+  if (min < 60) return `il y a ${min} min`;
+  const h = Math.round(min / 60);
+  if (h < 24) return `il y a ${h} h`;
+  return `le ${new Date(iso).toLocaleDateString('fr-FR', { day: 'numeric', month: 'short' })}`;
+}
+
+// Rattrape un envoi en attente (réseau revenu, appli rouverte)
+window.addEventListener('online', () => { if (cloud.dirty) cloudBackup(); });
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden && cloud.dirty) { clearTimeout(cloudTimer); cloudBackup(); }
+});
 
 if (navigator.storage && navigator.storage.persist) {
   navigator.storage.persist().catch(() => {});
@@ -129,6 +266,58 @@ function recurringDate(p, day) {
   return p.start;
 }
 
+/* ---------------- Montants par mois ----------------
+   Chaque revenu, charge, épargne et enveloppe garde un historique :
+   - hist[champ]      : [{ from: 'AAAA-MM', amount }] → valable à partir de ce mois
+   - overrides[champ] : { 'AAAA-MM': amount }        → pour ce mois uniquement
+   - end              : 'AAAA-MM' → plus compté à partir de ce mois
+   Les anciennes données (sans historique) valent pour tous les mois. */
+
+const monthKey = (p) => p.startISO.slice(0, 7);
+const monthName = (key) => new Date(+key.slice(0, 4), +key.slice(5, 7) - 1, 1).toLocaleDateString('fr-FR', { month: 'long', year: 'numeric' });
+
+function valueAt(item, field, key) {
+  const ov = item.overrides && item.overrides[field];
+  if (ov && ov[key] != null) return ov[key];
+  const h = item.hist && item.hist[field];
+  if (!h || !h.length) return item[field] || 0;
+  let v = 0;
+  for (const e of h) if (e.from <= key) v = e.amount;
+  return v;
+}
+
+function isActive(item, key) {
+  if (item.end && key >= item.end) return false;
+  const h = item.hist && Object.values(item.hist)[0];
+  return !h || !h.length || h[0].from <= key;
+}
+
+const isOverridden = (item, field, key) => !!(item.overrides && item.overrides[field] && item.overrides[field][key] != null);
+
+function setValueAt(item, field, key, amount, scope) {
+  if (scope === 'once') {
+    item.overrides = item.overrides || {};
+    item.overrides[field] = item.overrides[field] || {};
+    item.overrides[field][key] = amount;
+    return;
+  }
+  item.hist = item.hist || {};
+  const h = (item.hist[field] || [{ from: '', amount: item[field] || 0 }]).filter((e) => e.from < key);
+  h.push({ from: key, amount });
+  item.hist[field] = h;
+  const ov = item.overrides && item.overrides[field];
+  if (ov) for (const k of Object.keys(ov)) if (k >= key) delete ov[k];
+  item[field] = amount;
+}
+
+// Nouvel élément : compté seulement à partir du mois affiché
+function newScoped(field, amount, key, rest) {
+  return Object.assign({ id: uid(), [field]: amount, hist: { [field]: [{ from: key, amount }] } }, rest);
+}
+
+const activeList = (list, key) => list.filter((x) => isActive(x, key));
+const sumAt = (list, field, key) => activeList(list, key).reduce((a, x) => a + valueAt(x, field, key), 0);
+
 /* ---------------- Calculs ---------------- */
 
 function txInPeriod(p) {
@@ -136,12 +325,13 @@ function txInPeriod(p) {
 }
 
 function compute(p) {
+  const key = monthKey(p);
   const txs = txInPeriod(p);
-  const recurringIncome = state.incomes.reduce((a, i) => a + i.amount, 0);
+  const recurringIncome = sumAt(state.incomes, 'amount', key);
   const extraIncome = txs.filter((t) => t.type === 'income').reduce((a, t) => a + t.amount, 0);
   const income = recurringIncome + extraIncome;
-  const fixed = state.fixed.reduce((a, f) => a + f.amount, 0);
-  const saving = state.goals.reduce((a, g) => a + (g.monthly || 0), 0);
+  const fixed = sumAt(state.fixed, 'amount', key);
+  const saving = state.goals.reduce((a, g) => a + valueAt(g, 'monthly', key), 0);
   const available = income - fixed - saving; // ce qu'on peut dépenser librement
   const expenses = txs.filter((t) => t.type === 'expense');
   const spent = expenses.reduce((a, t) => a + t.amount, 0);
@@ -149,7 +339,7 @@ function compute(p) {
 
   const byCat = {};
   for (const t of expenses) byCat[t.categoryId] = (byCat[t.categoryId] || 0) + t.amount;
-  const budgeted = state.categories.reduce((a, c) => a + (c.budget || 0), 0);
+  const budgeted = state.categories.reduce((a, c) => a + valueAt(c, 'budget', key), 0);
 
   const today = new Date(); today.setHours(0, 0, 0, 0);
   let daysLeft = 0;
@@ -158,11 +348,11 @@ function compute(p) {
   else if (today < p.start) { daysLeft = dayDiff(p.start, p.end) + 1; status = 'future'; }
   const totalDays = dayDiff(p.start, p.end) + 1;
 
-  return { txs, income, recurringIncome, extraIncome, fixed, saving, available, spent, left, byCat, budgeted, daysLeft, totalDays, status };
+  return { key, txs, income, recurringIncome, extraIncome, fixed, saving, available, spent, left, byCat, budgeted, daysLeft, totalDays, status };
 }
 
-function envelopeState(cat, spent) {
-  const budget = cat.budget || 0;
+function envelopeState(cat, spent, key) {
+  const budget = valueAt(cat, 'budget', key);
   const left = budget - spent;
   const ratio = budget > 0 ? spent / budget : (spent > 0 ? 2 : 0);
   let level = 'good';
@@ -268,14 +458,14 @@ function renderHome(p) {
   // Alertes
   const alerts = [];
   for (const cat of state.categories) {
-    const e = envelopeState(cat, c.byCat[cat.id] || 0);
+    const e = envelopeState(cat, c.byCat[cat.id] || 0, c.key);
     if (e.level === 'crit' && e.spent > 0) alerts.push(`<div class="alert crit"><span class="ai">🚨</span><div><b>${esc(cat.emoji)} ${esc(cat.name)}</b> : dépassé de <b class="num">${eur(-e.left)}</b></div></div>`);
     else if (e.level === 'warn') alerts.push(`<div class="alert warn"><span class="ai">⚠️</span><div><b>${esc(cat.emoji)} ${esc(cat.name)}</b> : plus que <b class="num">${eur(e.left)}</b> (${Math.round(e.ratio * 100)} % utilisé)</div></div>`);
   }
   const toReview = c.txs.filter((t) => t.review).length;
   if (toReview) alerts.unshift(`<button class="alert info" style="width:100%;text-align:left" data-action="review"><span class="ai">❓</span><div><b>${toReview} dépense${toReview > 1 ? 's' : ''} automatique${toReview > 1 ? 's' : ''} à classer</b><br>Touche pour choisir l'enveloppe. Je retiendrai le commerçant.</div></button>`);
   const unassigned = c.available - c.budgeted;
-  if (state.incomes.length > 0) {
+  if (c.recurringIncome > 0) {
     if (unassigned < 0) alerts.push(`<div class="alert crit"><span class="ai">🧮</span><div>Tes enveloppes dépassent ton disponible de <b class="num">${eur(-unassigned)}</b>. Réduis-en certaines dans Budget.</div></div>`);
     else if (unassigned > 0 && c.status !== 'past') alerts.push(`<div class="alert info"><span class="ai">💡</span><div><b class="num">${eur(unassigned)}</b> ne sont dans aucune enveloppe. Tu peux les mettre de côté ou les répartir.</div></div>`);
   }
@@ -284,19 +474,20 @@ function renderHome(p) {
   // Prochains prélèvements
   if (c.status === 'current' && state.fixed.length) {
     const today = new Date(); today.setHours(0, 0, 0, 0);
-    const upcoming = state.fixed
-      .map((f) => ({ f, d: recurringDate(p, f.day) }))
+    const upcoming = activeList(state.fixed, c.key)
+      .map((f) => ({ f, d: recurringDate(p, f.day), amount: valueAt(f, 'amount', c.key) }))
+      .filter((x) => x.amount > 0)
       .filter((x) => x.d >= today)
       .sort((a, b) => a.d - b.d);
-    const upTotal = upcoming.reduce((a, x) => a + x.f.amount, 0);
+    const upTotal = upcoming.reduce((a, x) => a + x.amount, 0);
     if (upcoming.length) {
       html += `<div class="section-title"><span>À venir · ${eur(upTotal)}</span></div><div class="list">`;
-      html += upcoming.slice(0, 5).map(({ f, d }) => `
+      html += upcoming.slice(0, 5).map(({ f, d, amount }) => `
         <div class="row">
           <div class="row-icon">${esc(f.emoji || '📅')}</div>
           <div class="row-main"><div class="row-title">${esc(f.name)}</div>
           <div class="row-sub">${dayDiff(today, d) === 0 ? "aujourd'hui" : 'le ' + d.toLocaleDateString('fr-FR', { weekday: 'short', day: 'numeric', month: 'short' })}</div></div>
-          <div class="row-amount">−${eur(f.amount)}</div>
+          <div class="row-amount">−${eur(amount)}</div>
         </div>`).join('');
       html += `</div><div class="small muted" style="margin:6px 4px 0">Déjà déduits de ton reste à vivre.</div>`;
     }
@@ -372,13 +563,14 @@ function renderBudget(p) {
     <button class="${seg === 'goals' ? 'on' : ''}" data-action="budget-seg" data-seg="goals">③ Épargne</button>
     <button class="${seg === 'env' ? 'on' : ''}" data-action="budget-seg" data-seg="env">④ Dépenses</button>
   </div>`;
+  html += `<div class="small muted" style="margin:-4px 4px 10px">Tu règles le budget de <b>${monthName(c.key)}</b>. Change de mois avec les flèches en haut.</div>`;
   html += repartitionCard(c);
 
   if (seg === 'env') {
     html += `<div class="section-title"><span>Enveloppes de dépenses</span><button data-action="add-cat">+ Ajouter</button></div>
       <div class="small muted" style="margin:-4px 4px 8px">Combien tu t'autorises par mois dans chaque catégorie. Chaque dépense se range dans son enveloppe.</div><div class="list">`;
     html += state.categories.map((cat) => {
-      const e = envelopeState(cat, c.byCat[cat.id] || 0);
+      const e = envelopeState(cat, c.byCat[cat.id] || 0, c.key);
       const pct = e.budget > 0 ? Math.min(100, e.ratio * 100) : (e.spent > 0 ? 100 : 0);
       return `<button class="env" data-action="edit-cat" data-id="${cat.id}">
         <div class="env-top">
@@ -394,25 +586,24 @@ function renderBudget(p) {
   }
 
   if (seg === 'income') {
-    const incTotal = state.incomes.reduce((a, i) => a + i.amount, 0);
-    html += `<div class="section-title"><span>Sources de revenus · ${eur(incTotal)}/mois</span><button data-action="add-income">+ Ajouter</button></div>`;
-    html += `<div class="list">${state.incomes.length ? state.incomes.slice().sort((a, b) => a.day - b.day).map((i) => recurringRow(i, 'income', p)).join('') : '<div class="empty">Ajoute toutes tes sources de revenus :<br>salaire, APL, bourse, prime d\'activité, job étudiant…</div>'}</div>`;
-    if (!state.incomes.length) html += quickAdds('income', [['💼', 'Salaire'], ['🏠', 'APL'], ['🎓', 'Bourse'], ['➕', "Prime d'activité"], ['👨‍👩‍👦', 'Aide familiale']]);
+    const incomes = activeList(state.incomes, c.key);
+    html += `<div class="section-title"><span>Revenus de ${monthName(c.key).split(' ')[0]} · ${eur(c.recurringIncome)}</span><button data-action="add-income">+ Ajouter</button></div>`;
+    html += `<div class="list">${incomes.length ? incomes.slice().sort((a, b) => a.day - b.day).map((i) => recurringRow(i, 'income', p)).join('') : '<div class="empty">Ajoute toutes tes sources de revenus :<br>salaire, APL, bourse, prime d\'activité, job étudiant…</div>'}</div>`;
+    if (!incomes.length) html += quickAdds('income', [['💼', 'Salaire'], ['🏠', 'APL'], ['🎓', 'Bourse'], ['➕', "Prime d'activité"], ['👨‍👩‍👦', 'Aide familiale']]);
     html += `<div class="small muted" style="margin:8px 4px">Comptés automatiquement chaque mois. Un revenu exceptionnel (remboursement, vente…) s'ajoute avec le bouton <b>+</b>.</div>`;
-    if (state.incomes.length) html += `<button class="btn secondary" style="margin-top:12px" data-action="budget-seg" data-seg="fixed">Étape suivante : charges fixes →</button>`;
+    if (incomes.length) html += `<button class="btn secondary" style="margin-top:12px" data-action="budget-seg" data-seg="fixed">Étape suivante : charges fixes →</button>`;
   }
 
   if (seg === 'fixed') {
-    const fixTotal = state.fixed.reduce((a, f) => a + f.amount, 0);
-    html += `<div class="section-title"><span>Charges fixes · ${eur(fixTotal)}/mois</span><button data-action="add-fixed">+ Ajouter</button></div>`;
-    html += `<div class="list">${state.fixed.length ? state.fixed.slice().sort((a, b) => a.day - b.day).map((f) => recurringRow(f, 'fixed', p)).join('') : '<div class="empty">Tout ce qui tombe chaque mois sans que tu choisisses :<br>loyer, électricité, forfait, assurance, abonnements…</div>'}</div>`;
-    if (!state.fixed.length) html += quickAdds('fixed', [['🏠', 'Loyer'], ['⚡', 'Électricité'], ['📱', 'Forfait mobile'], ['🌐', 'Box internet'], ['🛡️', 'Assurance'], ['🎬', 'Abonnements']]);
+    const fixedList = activeList(state.fixed, c.key);
+    html += `<div class="section-title"><span>Charges de ${monthName(c.key).split(' ')[0]} · ${eur(c.fixed)}</span><button data-action="add-fixed">+ Ajouter</button></div>`;
+    html += `<div class="list">${fixedList.length ? fixedList.slice().sort((a, b) => a.day - b.day).map((f) => recurringRow(f, 'fixed', p)).join('') : '<div class="empty">Tout ce qui tombe chaque mois sans que tu choisisses :<br>loyer, électricité, forfait, assurance, abonnements…</div>'}</div>`;
+    if (!fixedList.length) html += quickAdds('fixed', [['🏠', 'Loyer'], ['⚡', 'Électricité'], ['📱', 'Forfait mobile'], ['🌐', 'Box internet'], ['🛡️', 'Assurance'], ['🎬', 'Abonnements']]);
     html += `<button class="btn secondary" style="margin-top:12px" data-action="budget-seg" data-seg="goals">Étape suivante : épargne & placements →</button>`;
   }
 
   if (seg === 'goals') {
-    const monthly = state.goals.reduce((a, g) => a + (g.monthly || 0), 0);
-    html += `<div class="section-title"><span>Épargne & placements · ${eur(monthly)}/mois</span><button data-action="add-goal">+ Ajouter</button></div>`;
+    html += `<div class="section-title"><span>Épargne de ${monthName(c.key).split(' ')[0]} · ${eur(c.saving)}</span><button data-action="add-goal">+ Ajouter</button></div>`;
     if (!state.goals.length) {
       html += `<div class="list"><div class="empty">Choisis combien tu mets de côté chaque mois et où :<br>Livret A, PEA, fonds d'urgence, projet…<br>Ces sommes sont réservées <b>avant</b> de calculer ton reste à vivre.</div></div>`;
       html += quickAdds('goal', [['🆘', "Fonds d'urgence"], ['🏦', 'Livret A'], ['📈', 'PEA'], ['💰', 'LDDS'], ['🌴', 'Vacances'], ['🚗', 'Permis / voiture']]);
@@ -421,7 +612,8 @@ function renderBudget(p) {
         const hasTarget = g.target > 0;
         const pct = hasTarget ? Math.min(100, (g.saved / g.target) * 100) : 0;
         const rest = Math.max(0, g.target - g.saved);
-        const months = hasTarget && g.monthly > 0 ? Math.ceil(rest / g.monthly) : null;
+        const monthly = valueAt(g, 'monthly', c.key);
+        const months = hasTarget && monthly > 0 ? Math.ceil(rest / monthly) : null;
         const kind = g.kind === 'invest' ? 'Placement' : 'Épargne';
         return `<button class="env" data-action="edit-goal" data-id="${g.id}">
           <div class="env-top">
@@ -430,7 +622,7 @@ function renderBudget(p) {
             <div class="env-left num">${eur(g.saved)}</div>
           </div>
           ${hasTarget ? `<div class="progress"><span style="width:${pct}%;background:var(--bar)"></span></div>` : ''}
-          <div class="env-meta"><span>${eur(g.monthly || 0)}/mois</span><span>${hasTarget ? (rest === 0 ? 'Objectif atteint 🎉' : `${Math.round(pct)} % de ${eur(g.target)}${months ? ` · ~${months} mois` : ''}`) : 'sans objectif'}</span></div>
+          <div class="env-meta"><span>${eur(monthly)} en ${monthName(c.key).split(' ')[0]}${isOverridden(g, 'monthly', c.key) ? ' <span class="tag">ce mois-ci</span>' : ''}</span><span>${hasTarget ? (rest === 0 ? 'Objectif atteint 🎉' : `${Math.round(pct)} % de ${eur(g.target)}${months ? ` · ~${months} mois` : ''}`) : 'sans objectif'}</span></div>
         </button>`;
       }).join('')}</div>
       <div class="small muted" style="margin:8px 4px">Touche une ligne pour enregistrer un versement ou modifier.</div>`;
@@ -470,6 +662,8 @@ function repartitionCard(c) {
 }
 
 function recurringRow(item, kind, p) {
+  const key = monthKey(p);
+  const amount = valueAt(item, 'amount', key);
   const d = recurringDate(p, item.day);
   const today = new Date(); today.setHours(0, 0, 0, 0);
   const passed = d <= today;
@@ -477,8 +671,8 @@ function recurringRow(item, kind, p) {
   return `<button class="row" data-action="edit-${kind}" data-id="${item.id}">
     <div class="row-icon">${esc(item.emoji || (kind === 'income' ? '💶' : '📅'))}</div>
     <div class="row-main"><div class="row-title">${esc(item.name)}</div>
-      <div class="row-sub">le ${item.day} du mois ${ui.offset === 0 ? `· <span class="tag ${passed ? 'done' : ''}">${label}</span>` : ''}</div></div>
-    <div class="row-amount ${kind === 'income' ? 'in' : ''}">${kind === 'income' ? '+' : '−'}${eur(item.amount)}</div>
+      <div class="row-sub">le ${item.day} du mois ${ui.offset === 0 && amount ? `· <span class="tag ${passed ? 'done' : ''}">${label}</span>` : ''}${isOverridden(item, 'amount', key) ? ' <span class="tag">ce mois-ci</span>' : ''}</div></div>
+    <div class="row-amount ${kind === 'income' && amount ? 'in' : ''}" style="${amount ? '' : 'color:var(--muted)'}">${amount ? (kind === 'income' ? '+' : '−') : ''}${eur(amount)}</div>
   </button>`;
 }
 
@@ -494,7 +688,8 @@ function renderStats(p) {
   else {
     html += rows.map(({ cat, v }) => {
       const share = c.spent ? Math.round((v / c.spent) * 100) : 0;
-      const budgetTxt = cat.budget ? ` · budget ${eur(cat.budget)}` : '';
+      const b = valueAt(cat, 'budget', c.key);
+      const budgetTxt = b ? ` · budget ${eur(b)}` : '';
       return `<div class="hbar" data-tip="${esc(cat.name)} : ${eur(v)} (${share} %)${budgetTxt}">
         <div class="hbar-top"><span>${esc(cat.emoji)} ${esc(cat.name)}</span><span class="num"><b>${eur(v)}</b> <span class="muted">${share} %</span></span></div>
         <div class="hbar-track"><div class="hbar-fill" style="width:${max ? (v / max) * 100 : 0}%"></div></div>
@@ -557,11 +752,21 @@ function renderSettings() {
         <select data-setting="startDay">${days.map((d) => `<option value="${d}" ${s.startDay === d ? 'selected' : ''}>le ${d}</option>`).join('')}</select></div>
     </div>
 
-    <div class="section-title">Sauvegarde</div>
+    <div class="section-title">☁️ Sauvegarde automatique</div>
+    ${cloudSettings()}
+
+    <div class="section-title">Copies sur le téléphone</div>
     <div class="card help">
-      Tes données restent <b>uniquement sur ce téléphone</b>. Fais une sauvegarde de temps en temps (dans Fichiers ou iCloud Drive) pour ne rien perdre.
+      Une copie est faite automatiquement chaque jour (30 jours gardés). Utile pour revenir en arrière après une erreur.
       <div style="margin-top:12px">
-        <button class="btn" data-action="export-json">💾 Sauvegarder mes données</button>
+        <button class="btn secondary" data-action="snapshots">🕘 Revenir à une copie précédente</button>
+      </div>
+    </div>
+
+    <div class="section-title">Fichiers</div>
+    <div class="card help">
+      <div>
+        <button class="btn secondary" data-action="export-json">💾 Enregistrer un fichier de sauvegarde</button>
         <button class="btn secondary" data-action="import-json">📂 Restaurer une sauvegarde</button>
         <button class="btn secondary" data-action="export-csv">📄 Exporter en tableur (CSV)</button>
       </div>
@@ -593,7 +798,7 @@ function renderSettings() {
 
     <div class="section-title">Zone sensible</div>
     <div class="list"><button class="row" data-action="reset" style="color:var(--crit);justify-content:center">Tout effacer</button></div>
-    <div class="small muted" style="text-align:center;margin-top:20px">ETR BUDGET · v1.0</div>`;
+    <div class="small muted" style="text-align:center;margin-top:20px">ETR BUDGET · v1.1</div>`;
 }
 
 function autoUrl() {
@@ -690,8 +895,9 @@ function txSheet(tx) {
     const p = periodFor(0);
     const spent = compute(p).byCat[id] || 0;
     const editingSame = editing && tx.type === 'expense' && tx.categoryId === id && tx.date >= p.startISO ? tx.amount : 0;
-    const left = (cat.budget || 0) - spent + editingSame;
-    document.getElementById('catHint').textContent = cat.budget ? `Il reste ${eur(left)} dans ${cat.name} ce mois-ci` : '';
+    const b = valueAt(cat, 'budget', monthKey(p));
+    const left = b - spent + editingSame;
+    document.getElementById('catHint').textContent = b ? `Il reste ${eur(left)} dans ${cat.name} ce mois-ci` : '';
   };
   hint();
   form.querySelectorAll('#typeSeg button').forEach((b) => b.addEventListener('click', () => {
@@ -717,7 +923,7 @@ function feedbackAfterExpense(tx) {
   if (tx.date < p.startISO || tx.date > p.endISO) { toast(`−${eur(tx.amount)} enregistré`); return; }
   const c = compute(p);
   const cat = catById(tx.categoryId);
-  const e = envelopeState(cat, c.byCat[cat.id] || 0);
+  const e = envelopeState(cat, c.byCat[cat.id] || 0, c.key);
   if (e.budget > 0 && e.left < 0) toast(`🚨 ${cat.name} dépassé de ${eur(-e.left)}`, 4000);
   else if (e.level === 'warn') toast(`⚠️ Plus que ${eur(e.left)} dans ${cat.name}`, 3500);
   else if (c.left < 0) toast(`🚨 Budget du mois dépassé de ${eur(-c.left)}`, 4000);
@@ -729,15 +935,18 @@ function recurringSheet(kind, item, preset) {
   const isIncome = kind === 'income';
   const list = isIncome ? state.incomes : state.fixed;
   const it = item || Object.assign({ name: '', amount: 0, day: 1, emoji: isIncome ? '💶' : '📅' }, preset);
+  const key = monthKey(periodFor(ui.offset));
+  const current = editing ? valueAt(item, 'amount', key) : it.amount;
   const body = `
     <div class="field-row emoji">
       <div class="field"><label>Icône</label><input class="input emoji-input" name="emoji" value="${esc(it.emoji)}" maxlength="4"></div>
       <div class="field"><label>Nom</label><input class="input" name="name" value="${esc(it.name)}" placeholder="${isIncome ? 'ex. Salaire' : 'ex. Loyer'}" maxlength="40" ${editing || preset ? '' : 'autofocus'}></div>
     </div>
     <div class="field-row">
-      <div class="field"><label>Montant mensuel</label><input class="input num" name="amount" inputmode="decimal" placeholder="0,00" value="${toInput(it.amount)}" ${preset ? 'autofocus' : ''}></div>
+      <div class="field"><label>Montant en ${monthName(key).split(' ')[0]}</label><input class="input num" name="amount" inputmode="decimal" placeholder="0,00" value="${toInput(current)}" ${preset ? 'autofocus' : ''}></div>
       <div class="field"><label>Jour du mois</label><input class="input num" name="day" inputmode="numeric" type="number" min="1" max="31" value="${it.day}"></div>
     </div>
+    ${editing ? scopeField(key) : `<div class="hint" style="margin:-6px 0 14px">Compté à partir de ${monthName(key)}, puis chaque mois.</div>`}
     <button class="btn" type="submit">${editing ? 'Enregistrer' : 'Ajouter'}</button>
     ${editing ? `<button class="btn danger" type="button" data-action="delete-${kind}" data-id="${it.id}">Supprimer</button>` : ''}`;
   openSheet(`${editing ? 'Modifier' : 'Ajouter'} ${isIncome ? 'un revenu' : 'une charge fixe'}`, body, (fd, f) => {
@@ -745,10 +954,12 @@ function recurringSheet(kind, item, preset) {
     const amount = parseAmount(fd.get('amount'));
     const day = Math.min(31, Math.max(1, parseInt(fd.get('day'), 10) || 1));
     if (!name) return invalid(f, 'name', 'Donne-lui un nom');
-    if (!(amount > 0)) return invalid(f, 'amount', 'Entre un montant');
-    const data = { name, amount, day, emoji: fd.get('emoji').trim() || (isIncome ? '💶' : '📅') };
-    if (editing) Object.assign(item, data);
-    else list.push({ id: uid(), ...data });
+    if (Number.isNaN(amount) || amount < 0 || (!editing && amount === 0)) return invalid(f, 'amount', 'Entre un montant');
+    const data = { name, day, emoji: fd.get('emoji').trim() || (isIncome ? '💶' : '📅') };
+    if (editing) {
+      Object.assign(item, data);
+      if (amount !== current) setValueAt(item, 'amount', key, amount, fd.get('scope'));
+    } else list.push(newScoped('amount', amount, key, data));
     state.onboarded = true;
     save(); render();
     toast(editing ? 'Modifié' : 'Ajouté');
@@ -758,13 +969,16 @@ function recurringSheet(kind, item, preset) {
 function catSheet(cat) {
   const editing = !!cat;
   const c = cat || { emoji: '🏷️', name: '', budget: 0 };
+  const key = monthKey(periodFor(ui.offset));
+  const current = editing ? valueAt(cat, 'budget', key) : 0;
   const body = `
     <div class="field-row emoji">
       <div class="field"><label>Icône</label><input class="input emoji-input" name="emoji" value="${esc(c.emoji)}" maxlength="4"></div>
       <div class="field"><label>Nom</label><input class="input" name="name" value="${esc(c.name)}" placeholder="ex. Courses" maxlength="30" ${editing ? '' : 'autofocus'}></div>
     </div>
-    <div class="field"><label>Budget mensuel</label><input class="input num" name="budget" inputmode="decimal" placeholder="0,00" value="${toInput(c.budget)}">
+    <div class="field"><label>Budget en ${monthName(key).split(' ')[0]}</label><input class="input num" name="budget" inputmode="decimal" placeholder="0,00" value="${toInput(current)}">
       <div class="hint">Laisse vide pour suivre sans limite.</div></div>
+    ${editing ? scopeField(key) : ''}
     <button class="btn" type="submit">${editing ? 'Enregistrer' : 'Ajouter'}</button>
     ${editing ? `<button class="btn danger" type="button" data-action="delete-cat" data-id="${c.id}">Supprimer l'enveloppe</button>` : ''}`;
   openSheet(editing ? "Modifier l'enveloppe" : 'Nouvelle enveloppe', body, (fd, f) => {
@@ -773,9 +987,11 @@ function catSheet(cat) {
     const raw = fd.get('budget').trim();
     const budget = raw ? parseAmount(raw) : 0;
     if (Number.isNaN(budget) || budget < 0) return invalid(f, 'budget', 'Montant invalide');
-    const data = { name, budget, emoji: fd.get('emoji').trim() || '🏷️' };
-    if (editing) Object.assign(cat, data);
-    else state.categories.push({ id: uid(), ...data });
+    const data = { name, emoji: fd.get('emoji').trim() || '🏷️' };
+    if (editing) {
+      Object.assign(cat, data);
+      if (budget !== current) setValueAt(cat, 'budget', key, budget, fd.get('scope'));
+    } else state.categories.push(newScoped('budget', budget, key, data));
     save(); render();
   });
 }
@@ -783,6 +999,8 @@ function catSheet(cat) {
 function goalSheet(goal, preset) {
   const editing = !!goal;
   const g = goal || Object.assign({ emoji: '🎯', name: '', target: 0, saved: 0, monthly: 0, kind: 'epargne' }, preset);
+  const key = monthKey(periodFor(ui.offset));
+  const current = editing ? valueAt(goal, 'monthly', key) : g.monthly;
   const body = `
     ${editing ? `
       <div class="card" style="background:var(--surface-2);border:0;box-shadow:none">
@@ -803,8 +1021,9 @@ function goalSheet(goal, preset) {
       <div class="field"><label>Objectif (facultatif)</label><input class="input num" name="target" inputmode="decimal" value="${toInput(g.target)}" placeholder="aucun"></div>
       <div class="field"><label>Montant actuel</label><input class="input num" name="saved" inputmode="decimal" value="${toInput(g.saved)}" placeholder="0,00"></div>
     </div>
-    <div class="field"><label>Mettre de côté chaque mois</label><input class="input num" name="monthly" inputmode="decimal" value="${toInput(g.monthly)}" placeholder="0,00" ${preset ? 'autofocus' : ''}>
+    <div class="field"><label>Mettre de côté en ${monthName(key).split(' ')[0]}</label><input class="input num" name="monthly" inputmode="decimal" value="${toInput(current)}" placeholder="0,00" ${preset ? 'autofocus' : ''}>
       <div class="hint">Ce montant est retiré de ton reste à vivre pour être sûr de le garder.</div></div>
+    ${editing ? scopeField(key) : ''}
     <button class="btn ${editing ? 'secondary' : ''}" type="submit">${editing ? 'Enregistrer les modifications' : 'Créer l\'objectif'}</button>
     ${editing ? `<button class="btn danger" type="button" data-action="delete-goal" data-id="${g.id}">Supprimer l'objectif</button>` : ''}`;
   openSheet(editing ? `${esc(g.emoji)} ${esc(g.name)}` : 'Nouvel objectif', body, (fd, f) => {
@@ -816,11 +1035,48 @@ function goalSheet(goal, preset) {
     if (Number.isNaN(target)) return invalid(f, 'target', 'Montant invalide');
     if (Number.isNaN(saved)) return invalid(f, 'saved', 'Montant invalide');
     if (Number.isNaN(monthly)) return invalid(f, 'monthly', 'Montant invalide');
-    const data = { name, kind: fd.get('kind'), target: Math.max(0, target), saved: Math.max(0, saved), monthly: Math.max(0, monthly), emoji: fd.get('emoji').trim() || '🎯' };
-    if (editing) Object.assign(goal, data);
-    else state.goals.push({ id: uid(), ...data });
+    const data = { name, kind: fd.get('kind'), target: Math.max(0, target), saved: Math.max(0, saved), emoji: fd.get('emoji').trim() || '🎯' };
+    if (editing) {
+      Object.assign(goal, data);
+      if (monthly !== current) setValueAt(goal, 'monthly', key, Math.max(0, monthly), fd.get('scope'));
+    } else state.goals.push(newScoped('monthly', Math.max(0, monthly), key, data));
     save(); render();
   });
+}
+
+// Choix : ce mois-ci seulement / ce mois et les suivants
+function scopeField(key) {
+  const m = monthName(key).split(' ')[0];
+  return `<div class="field"><span class="field-label">Appliquer le montant</span>
+    <div class="seg" style="margin:0">
+      <button type="button" class="on" data-action="scope" data-scope="from">À partir de ${m}</button>
+      <button type="button" data-action="scope" data-scope="once">En ${m} seulement</button>
+    </div>
+    <input type="hidden" name="scope" value="from">
+    <div class="hint" id="scopeHint">Les mois précédents gardent leur montant.</div></div>`;
+}
+
+function deleteScopedSheet(list, item) {
+  const key = monthKey(periodFor(ui.offset));
+  const first = item.hist && Object.values(item.hist)[0] && Object.values(item.hist)[0][0];
+  closeSheet();
+  // Créé ce mois-ci (ou après) : rien à garder, on supprime directement
+  if (first && first.from && first.from >= key) { remove(list, item.id); save(); render(); toast('Supprimé'); return; }
+  openSheet(`Supprimer ${esc(item.name)} ?`, `
+    <p class="help" style="margin-top:0">Si ça s'arrête, garde l'historique : les mois passés restent justes.</p>
+    <button class="btn" type="button" data-action="end-item" data-id="${item.id}">Arrêter à partir de ${monthName(key)}</button>
+    <button class="btn danger" type="button" data-action="purge-item" data-id="${item.id}">Supprimer de tous les mois</button>
+    <button class="btn secondary" type="button" data-action="close-sheet">Annuler</button>`, () => false);
+}
+
+function snapshotsSheet() {
+  const snaps = readJSON(SNAP_KEY, []);
+  openSheet('Copies automatiques', snaps.length ? `<div class="list">${snaps.map((sn, i) => `
+    <button class="row" type="button" data-action="restore-snap" data-i="${i}">
+      <div class="row-icon">🕘</div>
+      <div class="row-main"><div class="row-title">${new Date(sn.at).toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long' })}</div>
+      <div class="row-sub">à ${new Date(sn.at).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })} · ${sn.data.transactions.length} opérations</div></div>
+    </button>`).join('')}</div>` : '<div class="empty">Aucune copie pour l’instant.</div>', () => false);
 }
 
 function confirmSheet(title, text, label, onYes) {
@@ -915,6 +1171,60 @@ function download(name, content, type) {
   document.body.appendChild(a);
   a.click();
   setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+}
+
+function cloudSettings() {
+  if (!cloudReady()) {
+    return `<div class="card help">
+      Chaque modification sera envoyée toute seule dans ton dépôt GitHub <b>privé</b>. Personne d'autre ne peut le voir. Même si l'iPhone efface les données de Safari, tu récupères tout.
+      <ol>
+        <li>Touche <b>Créer mon jeton</b> ci-dessous (connecte-toi à GitHub si besoin)</li>
+        <li>Expiration : choisis la plus longue (ou <b>No expiration</b>)</li>
+        <li>Repository access : <b>Only select repositories</b> → <b>etr-budget-data</b></li>
+        <li>Permissions → Repository → <b>Contents</b> : <b>Read and write</b></li>
+        <li><b>Generate token</b>, copie-le et colle-le ici</li>
+      </ol>
+      <a class="btn secondary" style="margin-top:10px;text-decoration:none" target="_blank" rel="noopener"
+         href="https://github.com/settings/personal-access-tokens/new?name=ETR%20BUDGET%20sauvegarde&description=Sauvegarde%20auto%20ETR%20BUDGET&target_name=${encodeURIComponent(DEFAULT_REPO.split('/')[0])}&contents=write">🔑 Créer mon jeton</a>
+      <div class="field" style="margin-top:12px"><label>Dépôt privé</label><input class="input" id="cloudRepo" value="${esc(DEFAULT_REPO)}" autocapitalize="off" autocorrect="off" spellcheck="false"></div>
+      <div class="field"><label>Jeton</label><input class="input" id="cloudToken" type="password" placeholder="github_pat_…" autocapitalize="off" autocorrect="off" spellcheck="false"></div>
+      <button class="btn" data-action="cloud-connect">Activer la sauvegarde automatique</button>
+    </div>`;
+  }
+  return `<div class="card help">
+    <div style="display:flex;justify-content:space-between;gap:8px"><span>Statut</span><b style="text-align:right">${esc(cloudStatusText())}</b></div>
+    <div class="small muted" style="margin-top:4px">Dépôt privé : ${esc(cloud.repo)}</div>
+    <div style="margin-top:12px">
+      <button class="btn secondary" data-action="cloud-now">☁️ Sauvegarder maintenant</button>
+      <button class="btn secondary" data-action="cloud-restore">⤵️ Restaurer depuis le cloud</button>
+      <button class="btn danger" data-action="cloud-off">Désactiver</button>
+    </div>
+  </div>`;
+}
+
+const DEFAULT_REPO = 'elouantanguyrollier-cloud/etr-budget-data';
+
+async function cloudConnect() {
+  const repo = document.getElementById('cloudRepo').value.trim().replace(/^https:\/\/github\.com\//, '').replace(/\/$/, '');
+  const token = document.getElementById('cloudToken').value.trim();
+  if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) { toast('Nom de dépôt invalide (ex. pseudo/etr-budget-data)'); return; }
+  if (!token) { toast('Colle ton jeton GitHub'); return; }
+  cloud = { repo, token };
+  // Vérifie l'accès au dépôt avant d'activer
+  try {
+    const r = await fetch(`https://api.github.com/repos/${repo}`, { headers: { Authorization: `Bearer ${token}` }, cache: 'no-store' });
+    if (!r.ok) { toast(r.status === 404 ? 'Dépôt introuvable avec ce jeton' : 'Jeton refusé'); cloud = {}; return; }
+    const info = await r.json();
+    if (!info.private) { toast('⚠️ Ce dépôt est public : choisis un dépôt privé'); cloud = {}; return; }
+  } catch (e) { toast('Pas de connexion internet'); cloud = {}; return; }
+  saveCloud();
+  render();
+  const existing = await gh(CLOUD_FILE);
+  if (existing.ok && !state.transactions.length && !state.incomes.length) {
+    cloudRestore(); // téléphone vide + sauvegarde existante : on propose de récupérer
+  } else {
+    await cloudBackup(true);
+  }
 }
 
 function exportJSON() {
@@ -1031,10 +1341,26 @@ document.addEventListener('click', (e) => {
     }
     case 'add-income': recurringSheet('income'); break;
     case 'edit-income': recurringSheet('income', find(state.incomes, id)); break;
-    case 'delete-income': remove(state.incomes, id); save(); closeSheet(); render(); break;
+    case 'delete-income': deleteScopedSheet(state.incomes, find(state.incomes, id)); break;
     case 'add-fixed': recurringSheet('fixed'); break;
     case 'edit-fixed': recurringSheet('fixed', find(state.fixed, id)); break;
-    case 'delete-fixed': remove(state.fixed, id); save(); closeSheet(); render(); break;
+    case 'delete-fixed': deleteScopedSheet(state.fixed, find(state.fixed, id)); break;
+    case 'end-item': {
+      const it = find(state.incomes, id) || find(state.fixed, id);
+      it.end = monthKey(periodFor(ui.offset));
+      save(); closeSheet(); render(); toast(`Arrêté à partir de ${monthName(it.end)}`);
+      break;
+    }
+    case 'purge-item': remove(state.incomes, id); remove(state.fixed, id); save(); closeSheet(); render(); toast('Supprimé'); break;
+    case 'scope': {
+      const box = el.closest('.field');
+      box.querySelector('[name="scope"]').value = el.dataset.scope;
+      box.querySelectorAll('[data-action="scope"]').forEach((b) => b.classList.toggle('on', b === el));
+      box.querySelector('#scopeHint').textContent = el.dataset.scope === 'once'
+        ? 'Les autres mois ne changent pas.'
+        : 'Les mois précédents gardent leur montant.';
+      break;
+    }
     case 'add-goal': goalSheet(); break;
     case 'quick-income': recurringSheet('income', null, { name: el.dataset.name, emoji: el.dataset.emoji }); break;
     case 'quick-fixed': recurringSheet('fixed', null, { name: el.dataset.name, emoji: el.dataset.emoji }); break;
@@ -1054,6 +1380,23 @@ document.addEventListener('click', (e) => {
       break;
     }
     case 'export-json': exportJSON(); break;
+    case 'cloud-connect': cloudConnect(); break;
+    case 'cloud-now': cloudBackup(true); break;
+    case 'cloud-restore': cloudRestore(); break;
+    case 'cloud-off':
+      confirmSheet('Désactiver la sauvegarde cloud ?', 'Le jeton sera oublié sur ce téléphone. Les sauvegardes déjà envoyées restent dans ton dépôt.', 'Désactiver', () => {
+        cloud = {}; saveCloud(); render();
+      });
+      break;
+    case 'snapshots': snapshotsSheet(); break;
+    case 'restore-snap': {
+      const snap = readJSON(SNAP_KEY, [])[+el.dataset.i];
+      closeSheet();
+      confirmSheet('Revenir à cette copie ?', `Copie du ${new Date(snap.at).toLocaleString('fr-FR')}. Les changements faits depuis seront perdus.`, 'Revenir à cette copie', () => {
+        state = Object.assign(freshState(), snap.data); save(); render(); toast('✓ Copie restaurée');
+      });
+      break;
+    }
     case 'export-csv': exportCSV(); break;
     case 'import-json': document.getElementById('importFile').click(); break;
     case 'reset':
@@ -1079,6 +1422,7 @@ document.addEventListener('visibilitychange', () => { if (!document.hidden && $s
 
 render();
 handleIncomingLink();
+if (cloud.dirty || (cloudReady() && cloud.last && Date.now() - new Date(cloud.last) > 864e5)) cloudBackup();
 
 if ('serviceWorker' in navigator && location.protocol !== 'file:') {
   navigator.serviceWorker.register('sw.js').catch(() => {});
