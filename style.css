@@ -332,3 +332,12 @@ button.row:active { background: var(--surface-2); }
 .setting-row select { background: var(--surface-2); border: 0; border-radius: 10px; padding: 8px 10px; font-size: 15px; }
 .help { font-size: 14px; color: var(--ink-2); line-height: 1.5; }
 .help ol { padding-left: 20px; margin: 8px 0 0; }
+
+/* ---------- Blocs repliables & liens ---------- */
+details.fold { padding: 0; }
+details.fold > summary { list-style: none; cursor: pointer; padding: 16px; font-weight: 650; display: flex; justify-content: space-between; align-items: center; }
+details.fold > summary::-webkit-details-marker { display: none; }
+details.fold > summary::after { content: '›'; font-size: 22px; color: var(--muted); transition: transform .2s; }
+details.fold[open] > summary::after { transform: rotate(90deg); }
+.fold-body { padding: 0 16px 16px; }
+.link-btn { display: block; margin: 2px auto 8px; padding: 6px 12px; color: var(--accent); font-weight: 600; font-size: 14px; }

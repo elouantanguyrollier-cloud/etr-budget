@@ -5,7 +5,7 @@
    Montants en centimes (entiers) pour éviter les erreurs d'arrondi.
    ========================================================= */
 
-const APP_VERSION = '2.0';
+const APP_VERSION = '2.1';
 const STORE_KEY = 'etr-budget-v1';
 
 const DEFAULT_CATEGORIES = [
@@ -20,7 +20,7 @@ const DEFAULT_CATEGORIES = [
 ];
 
 let state;
-let ui = { tab: 'home', offset: 0, opsFilter: 'all', budgetSeg: 'income' };
+let ui = { tab: 'home', offset: 0, opsFilter: 'all', budgetSeg: 'income', allAlerts: false, open: {} };
 
 /* ---------------- Stockage ---------------- */
 
@@ -498,76 +498,43 @@ function renderHome(p) {
       </div>`;
   }
 
-  // Carte principale
-  let sub;
-  if (c.status === 'current') {
-    sub = `sur <strong class="num">${eur(c.available)}</strong> disponibles ce mois-ci`;
-  } else if (c.status === 'past') {
-    sub = c.left >= 0 ? `Mois terminé avec <strong>${eur(c.left)}</strong> d'avance 🎉` : `Mois terminé avec <strong>${eur(-c.left)}</strong> de dépassement`;
-  } else {
-    sub = `prévus sur <strong class="num">${eur(c.available)}</strong> disponibles`;
+  // Carte principale : une seule idée, « combien puis-je encore dépenser ? »
+  const dateEnd = p.end.toLocaleDateString('fr-FR', { day: 'numeric', month: 'long' });
+  let pastNote = '';
+  if (c.status === 'past') pastNote = `<div class="hero-sub">${c.left >= 0 ? `Mois terminé avec <strong>${eur(c.left)}</strong> d'avance 🎉` : `Mois terminé avec <strong>${eur(-c.left)}</strong> de dépassement`}</div>`;
+  let perdayHtml = '';
+  if (c.status !== 'past') {
+    const txt = c.left > 0
+      ? `par jour · <b>${c.daysLeft} jour${c.daysLeft > 1 ? 's' : ''}</b> restant${c.daysLeft > 1 ? 's' : ''}<br>jusqu'au ${dateEnd}`
+      : c.left < 0
+        ? `<b>Budget dépassé.</b> Évite les dépenses non essentielles jusqu'au ${dateEnd}.`
+        : c.income === 0 ? 'Ajoute tes revenus dans <b>Budget</b> pour commencer.' : "<b>Plus rien de disponible</b> jusqu'à la fin du mois.";
+    perdayHtml = `<div class="perday ${level === 'good' ? '' : level}"><div class="perday-amount num">${c.left > 0 ? eur(perDay) : '0 €'}</div><div class="perday-text">${txt}</div></div>`;
   }
-
   html += `
     <div class="card hero">
       <div class="hero-label">Reste à vivre</div>
       <div class="hero-amount num ${c.left < 0 ? 'neg' : ''}">${eur(c.left)}</div>
-      <div class="hero-sub">${sub}</div>
-      ${c.status !== 'past' ? `
-        <div class="perday ${level === 'good' ? '' : level}">
-          <div class="perday-amount num">${c.left > 0 ? eur(perDay) : '0 €'}</div>
-          <div class="perday-text">${c.left > 0
-            ? `par jour pendant <b>${c.daysLeft} jour${c.daysLeft > 1 ? 's' : ''}</b><br>jusqu'au ${p.end.toLocaleDateString('fr-FR', { day: 'numeric', month: 'long' })}`
-            : c.left < 0
-              ? `<b>Budget dépassé.</b> Évite toute dépense non essentielle d'ici le ${p.end.toLocaleDateString('fr-FR', { day: 'numeric', month: 'long' })}.`
-              : c.income === 0 ? 'Ajoute tes revenus dans <b>Budget</b> pour calculer ton reste à vivre.' : "<b>Plus rien de disponible</b> jusqu'à la fin du mois."}</div>
-        </div>` : ''}
+      ${pastNote}${perdayHtml}
       <div class="progress ${level === 'good' ? '' : level}"><span style="width:${usedPct}%"></span></div>
-      <div class="progress-legend"><span>Dépensé ${eur(c.spent)}</span><span>${Math.round(usedPct)} %</span></div>
-    </div>
-    <div class="kpis">
-      <div class="kpi"><div class="kpi-label">Revenus</div><div class="kpi-value num">${eurShort(c.income)}</div></div>
-      <div class="kpi"><div class="kpi-label">Charges fixes</div><div class="kpi-value num">${eurShort(c.fixed)}</div></div>
-      <div class="kpi"><div class="kpi-label">Épargne prévue</div><div class="kpi-value num">${eurShort(c.saving)}</div></div>
-      <div class="kpi"><div class="kpi-label">Dépenses</div><div class="kpi-value num">${eurShort(c.spent)}</div></div>
+      <div class="progress-legend"><span>Dépensé ${eur(c.spent)}</span><span>sur ${eur(c.available)}</span></div>
     </div>`;
 
-  // Alertes
+  // Alertes : les plus graves d'abord, deux au maximum (le reste se déplie)
   const alerts = [];
   for (const cat of state.categories) {
     const e = envelopeState(cat, c.byCat[cat.id] || 0, c.key);
-    if (e.level === 'crit' && e.spent > 0) alerts.push(`<div class="alert crit"><span class="ai">🚨</span><div><b>${esc(cat.emoji)} ${esc(cat.name)}</b> : dépassé de <b class="num">${eur(-e.left)}</b></div></div>`);
-    else if (e.level === 'warn') alerts.push(`<div class="alert warn"><span class="ai">⚠️</span><div><b>${esc(cat.emoji)} ${esc(cat.name)}</b> : plus que <b class="num">${eur(e.left)}</b> (${Math.round(e.ratio * 100)} % utilisé)</div></div>`);
+    if (e.level === 'crit' && e.spent > 0) alerts.push({ sev: 0, html: `<div class="alert crit"><span class="ai">🚨</span><div><b>${esc(cat.emoji)} ${esc(cat.name)}</b> : dépassé de <b class="num">${eur(-e.left)}</b></div></div>` });
+    else if (e.level === 'warn') alerts.push({ sev: 3, html: `<div class="alert warn"><span class="ai">⚠️</span><div><b>${esc(cat.emoji)} ${esc(cat.name)}</b> : plus que <b class="num">${eur(e.left)}</b></div></div>` });
   }
   const toReview = c.txs.filter((t) => t.review).length;
-  if (toReview) alerts.unshift(`<button class="alert info" style="width:100%;text-align:left" data-action="review"><span class="ai">❓</span><div><b>${toReview} dépense${toReview > 1 ? 's' : ''} automatique${toReview > 1 ? 's' : ''} à classer</b><br>Touche pour choisir l'enveloppe. Je retiendrai le commerçant.</div></button>`);
-  const unassigned = c.available - c.budgeted;
-  if (c.recurringIncome > 0) {
-    if (unassigned < 0) alerts.push(`<div class="alert crit"><span class="ai">🧮</span><div>Tes enveloppes dépassent ton disponible de <b class="num">${eur(-unassigned)}</b>. Réduis-en certaines dans Budget.</div></div>`);
-    else if (unassigned > 0 && c.status !== 'past') alerts.push(`<div class="alert info"><span class="ai">💡</span><div><b class="num">${eur(unassigned)}</b> ne sont dans aucune enveloppe. Tu peux les mettre de côté ou les répartir.</div></div>`);
-  }
-  if (alerts.length) html += `<div class="section-title">Alertes</div>${alerts.join('')}`;
-
-  // Prochains prélèvements
-  if (c.status === 'current' && state.fixed.length) {
-    const today = new Date(); today.setHours(0, 0, 0, 0);
-    const upcoming = activeList(state.fixed, c.key)
-      .map((f) => ({ f, d: recurringDate(p, f.day), amount: valueAt(f, 'amount', c.key) }))
-      .filter((x) => x.amount > 0)
-      .filter((x) => x.d >= today)
-      .sort((a, b) => a.d - b.d);
-    const upTotal = upcoming.reduce((a, x) => a + x.amount, 0);
-    if (upcoming.length) {
-      html += `<div class="section-title"><span>À venir · ${eur(upTotal)}</span></div><div class="list">`;
-      html += upcoming.slice(0, 5).map(({ f, d, amount }) => `
-        <div class="row">
-          <div class="row-icon">${esc(f.emoji || '📅')}</div>
-          <div class="row-main"><div class="row-title">${esc(f.name)}</div>
-          <div class="row-sub">${dayDiff(today, d) === 0 ? "aujourd'hui" : 'le ' + d.toLocaleDateString('fr-FR', { weekday: 'short', day: 'numeric', month: 'short' })}</div></div>
-          <div class="row-amount">−${eur(amount)}</div>
-        </div>`).join('');
-      html += `</div><div class="small muted" style="margin:6px 4px 0">Déjà déduits de ton reste à vivre.</div>`;
-    }
+  if (toReview) alerts.push({ sev: 2, html: `<button class="alert info" style="width:100%;text-align:left" data-action="review"><span class="ai">❓</span><div><b>${toReview} dépense${toReview > 1 ? 's' : ''} à classer</b><br>Touche pour choisir l'enveloppe.</div></button>` });
+  if (c.recurringIncome > 0 && c.available - c.budgeted < 0) alerts.push({ sev: 1, html: `<div class="alert crit"><span class="ai">🧮</span><div>Tes enveloppes dépassent ton disponible de <b class="num">${eur(c.budgeted - c.available)}</b>. Voir <b>Budget</b>.</div></div>` });
+  alerts.sort((x, y) => x.sev - y.sev);
+  if (alerts.length) {
+    const shown = ui.allAlerts ? alerts : alerts.slice(0, 2);
+    html += shown.map((x) => x.html).join('');
+    if (alerts.length > shown.length) html += `<button class="link-btn" data-action="show-alerts">Voir ${alerts.length - shown.length} autre${alerts.length - shown.length > 1 ? 's' : ''} alerte${alerts.length - shown.length > 1 ? 's' : ''}</button>`;
   }
 
   // Dernières opérations
@@ -778,13 +745,10 @@ function renderStats(p) {
   // Chiffres clés
   const elapsed = c.status === 'current' ? c.totalDays - c.daysLeft + 1 : c.totalDays;
   const avg = elapsed > 0 ? Math.round(c.spent / elapsed) : 0;
-  const biggest = c.txs.filter((t) => t.type === 'expense').sort((a, b) => b.amount - a.amount)[0];
   const projected = c.status === 'current' ? avg * c.totalDays : c.spent;
-  html += `<div class="section-title">Chiffres clés</div><div class="stat-grid">
+  html += `<div class="section-title">Rythme</div><div class="stat-grid">
     <div class="kpi"><div class="kpi-label">Moyenne / jour</div><div class="kpi-value num">${eur(avg)}</div></div>
     <div class="kpi"><div class="kpi-label">${c.status === 'current' ? 'Projection fin de mois' : 'Total dépensé'}</div><div class="kpi-value num" style="color:${projected > c.available ? 'var(--crit)' : 'inherit'}">${eurShort(projected)}</div></div>
-    <div class="kpi"><div class="kpi-label">Nb de dépenses</div><div class="kpi-value num">${c.txs.filter((t) => t.type === 'expense').length}</div></div>
-    <div class="kpi"><div class="kpi-label">Plus grosse dépense</div><div class="kpi-value num">${biggest ? eurShort(biggest.amount) : '—'}</div></div>
   </div>`;
   if (c.status === 'current' && projected > c.available && c.spent > 0) {
     html += `<div class="alert warn" style="margin-top:8px"><span class="ai">📈</span><div>À ce rythme tu dépasserais de <b class="num">${eur(projected - c.available)}</b> en fin de mois. Vise <b class="num">${eur(Math.max(0, Math.floor(c.left / Math.max(1, c.daysLeft))))}</b>/jour.</div></div>`;
@@ -832,29 +796,10 @@ function renderSettings() {
     <div class="section-title">☁️ Synchro iPhone ↔ ordinateur</div>
     ${cloudSettings()}
 
-    <div class="section-title">Copies sur le téléphone</div>
-    <div class="card help">
-      Une copie est faite automatiquement chaque jour (30 jours gardés). Utile pour revenir en arrière après une erreur.
-      <div style="margin-top:12px">
-        <button class="btn secondary" data-action="snapshots">🕘 Revenir à une copie précédente</button>
-      </div>
-    </div>
+    <button class="btn secondary" style="margin-top:14px" data-action="import-bank">🏦 Importer un relevé de ma banque</button>
+    <input type="file" id="bankFile" accept=".csv,.txt,.ofx,.qfx,.qif,text/csv,text/plain" hidden>
 
-    <div class="section-title">Fichiers</div>
-    <div class="card help">
-      <div>
-        <button class="btn secondary" data-action="import-bank">🏦 Importer un relevé de ma banque (CSV, OFX)</button>
-        <input type="file" id="bankFile" accept=".csv,.txt,.ofx,.qfx,.qif,text/csv,text/plain" hidden>
-        <button class="btn secondary" data-action="copy-transfer">📋 Copier un lien pour mon autre appareil</button>
-        <button class="btn secondary" data-action="export-json">💾 Enregistrer un fichier de sauvegarde</button>
-        <button class="btn secondary" data-action="import-json">📂 Restaurer une sauvegarde</button>
-        <button class="btn secondary" data-action="export-csv">📄 Exporter en tableur (CSV)</button>
-      </div>
-      <input type="file" id="importFile" accept="application/json,.json" hidden>
-    </div>
-
-    <div class="section-title">⚡ Ajouter une dépense en 2 secondes</div>
-    <div class="card help">
+    ${fold('shortcut', '⚡ Raccourci pour ajouter une dépense', `
       Un raccourci pour ton iPhone : tu appuies sur le <b>bouton Action</b>, tu tapes le montant et le commerçant, et la dépense est rangée toute seule dans la bonne enveloppe (Lidl → Courses…). Je m'en souviens pour les prochaines fois.
       <ol>
         <li>Touche d'abord <b>Copier mon code de synchro</b> ci-dessous.</li>
@@ -874,21 +819,37 @@ function renderSettings() {
         <div class="input small num" style="margin-top:8px;overflow-wrap:anywhere;word-break:break-all;user-select:all;-webkit-user-select:all">${esc(autoUrl())}</div>
         <button class="btn secondary" style="margin-top:8px" data-action="copy-url" data-url="${esc(autoUrl())}">Copier le lien</button>
       </details>
-    </div>
+    `)}
 
-    <div class="section-title">Installer sur l'iPhone</div>
-    <div class="card help">
-      <ol style="margin:0">
+    ${fold('backup', '💾 Sauvegardes et fichiers', `
+      <div class="hint" style="margin-top:0">Une copie est faite automatiquement chaque jour sur cet appareil (30 jours gardés).</div>
+      <button class="btn secondary" style="margin-top:10px" data-action="snapshots">🕘 Revenir à une copie précédente</button>
+      <button class="btn secondary" data-action="copy-transfer">📋 Copier un lien pour mon autre appareil</button>
+      <button class="btn secondary" data-action="export-json">💾 Enregistrer un fichier de sauvegarde</button>
+      <button class="btn secondary" data-action="import-json">📂 Restaurer une sauvegarde</button>
+      <button class="btn secondary" data-action="export-csv">📄 Exporter en tableur (CSV)</button>
+      <input type="file" id="importFile" accept="application/json,.json" hidden>`)}
+
+    ${fold('install', '📲 Installer sur l\'iPhone', `
+      <ol style="margin:0;padding-left:20px">
         <li>Ouvre cette page dans <b>Safari</b></li>
-        <li>Touche <b>Partager</b> (carré avec une flèche), puis <b>« Sur l'écran d'accueil »</b></li>
-        <li>Garde <b>« Ouvrir en tant qu'app web »</b> activé pour l'affichage plein écran, et active la synchro pour partager les données avec Safari.</li>
-      </ol>
-    </div>
+        <li>Touche <b>Partager</b>, puis <b>« Sur l'écran d'accueil »</b></li>
+        <li>Garde <b>« Ouvrir en tant qu'app web »</b> activé.</li>
+      </ol>`)}
 
     <div class="section-title">Zone sensible</div>
     <div class="list"><button class="row" data-action="reset" style="color:var(--crit);justify-content:center">Tout effacer</button></div>
     <div class="small muted" style="text-align:center;margin-top:20px">ETR BUDGET · version ${APP_VERSION}</div>`;
 }
+
+// Bloc repliable ; l'état ouvert/fermé survit aux rafraîchissements de l'écran
+function fold(key, title, inner) {
+  return `<details class="fold card help" data-key="${key}" ${ui.open[key] ? 'open' : ''}><summary>${title}</summary><div class="fold-body">${inner}</div></details>`;
+}
+document.addEventListener('toggle', (e) => {
+  const k = e.target.dataset && e.target.dataset.key;
+  if (k) ui.open[k] = e.target.open;
+}, true);
 
 function autoUrl() {
   return `${location.origin}${location.pathname}#ajout?montant=MONTANT&marchand=MARCHAND`;
@@ -1671,6 +1632,7 @@ document.addEventListener('click', (e) => {
       remove(state.transactions, id); save(); closeSheet(); render(); toast('Opération supprimée');
       break;
     case 'close-sheet': closeSheet(); break;
+    case 'show-alerts': ui.allAlerts = true; render(); break;
     case 'ops-filter': ui.opsFilter = el.dataset.f; render(); break;
     case 'review': ui.tab = 'ops'; ui.opsFilter = 'review'; render(); break;
     case 'budget-seg': ui.budgetSeg = el.dataset.seg; render(); break;
