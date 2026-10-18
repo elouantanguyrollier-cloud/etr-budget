@@ -5,7 +5,7 @@
    Montants en centimes (entiers) pour éviter les erreurs d'arrondi.
    ========================================================= */
 
-const APP_VERSION = '1.2';
+const APP_VERSION = '1.3';
 const STORE_KEY = 'etr-budget-v1';
 
 const DEFAULT_CATEGORIES = [
@@ -56,6 +56,7 @@ function load() {
 }
 
 function save() {
+  state.updatedAt = new Date().toISOString();
   try {
     localStorage.setItem(STORE_KEY, JSON.stringify(state));
   } catch (e) {
@@ -96,12 +97,27 @@ let cloudBusy = false;
 
 const saveCloud = () => writeJSON(CLOUD_KEY, cloud);
 const cloudReady = () => !!(cloud.token && cloud.repo);
+const isEmptyState = (s) => !s.transactions.length && !s.incomes.length && !s.fixed.length && !s.goals.length;
 
 function scheduleCloudBackup() {
   if (!cloudReady()) return;
   cloud.dirty = true; saveCloud();
   clearTimeout(cloudTimer);
-  cloudTimer = setTimeout(cloudBackup, 4000);
+  cloudTimer = setTimeout(cloudSync, 3000);
+}
+
+// Enregistre sur l'appareil sans déclencher d'envoi (données reçues du cloud)
+function persistLocal() {
+  try { localStorage.setItem(STORE_KEY, JSON.stringify(state)); } catch (e) { /* plein */ }
+  snapshotDaily();
+}
+
+// Remplace toutes les données (restauration, import, remise à zéro) :
+// le prochain envoi écrase la version du cloud au lieu de fusionner.
+function replaceState(data) {
+  state = Object.assign(freshState(), data);
+  cloud.force = true; saveCloud();
+  save();
 }
 
 function b64encode(str) {
@@ -116,41 +132,85 @@ function b64decode(b64) {
 }
 
 async function gh(path, opts = {}) {
-  const res = await fetch(`https://api.github.com/repos/${cloud.repo}/contents/${path}`, {
+  return fetch(`https://api.github.com/repos/${cloud.repo}/contents/${path}`, {
     ...opts,
     headers: { Authorization: `Bearer ${cloud.token}`, Accept: 'application/vnd.github+json', ...(opts.headers || {}) },
     cache: 'no-store',
   });
-  return res;
 }
 
-async function cloudBackup(manual = false) {
+async function readRemote() {
+  const r = await gh(CLOUD_FILE);
+  if (r.status === 404) return { sha: null, data: null };
+  if (!r.ok) throw r;
+  const f = await r.json();
+  return { sha: f.sha, data: JSON.parse(b64decode(f.content)) };
+}
+
+/* Fusion de deux versions (iPhone + ordinateur modifiés entre deux synchros).
+   La version la plus récente gagne pour les réglages et les éléments présents des deux côtés ;
+   les éléments ajoutés d'un seul côté sont gardés ; les suppressions sont respectées. */
+const SYNC_LISTS = ['transactions', 'categories', 'incomes', 'fixed', 'goals'];
+
+function mergeStates(local, remote) {
+  const remoteNewer = (remote.updatedAt || '') > (local.updatedAt || '');
+  const newer = remoteNewer ? remote : local;
+  const older = remoteNewer ? local : remote;
+  const out = JSON.parse(JSON.stringify(newer));
+  out.deleted = Object.assign({}, older.deleted, newer.deleted);
+  for (const k of SYNC_LISTS) {
+    out[k] = out[k] || [];
+    const ids = new Set(out[k].map((x) => x.id));
+    for (const it of older[k] || []) if (!ids.has(it.id)) out[k].push(JSON.parse(JSON.stringify(it)));
+    out[k] = out[k].filter((x) => !out.deleted[x.id]);
+  }
+  out.rules = Object.assign({}, older.rules, newer.rules);
+  out.createdAt = [local.createdAt, remote.createdAt].filter(Boolean).sort()[0];
+  return out;
+}
+
+async function cloudSync(manual = false) {
   if (!cloudReady() || cloudBusy) return;
   if (!navigator.onLine) { cloud.status = 'offline'; saveCloud(); return; }
+  if (!$sheet.hidden) { clearTimeout(cloudTimer); cloudTimer = setTimeout(cloudSync, 5000); return; } // saisie en cours
   cloudBusy = true;
+  let received = false;
   try {
-    for (let attempt = 0; attempt < 2; attempt++) {
-      if (!cloud.sha) {
-        const r = await gh(CLOUD_FILE);
-        if (r.ok) cloud.sha = (await r.json()).sha;
-        else if (r.status !== 404) throw r;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      // 1. Récupérer ce que les autres appareils ont envoyé
+      const remote = await readRemote();
+      if (remote.data && remote.sha !== cloud.sha && !cloud.force) {
+        if (cloud.dirty && !isEmptyState(state)) {
+          state = Object.assign(freshState(), mergeStates(state, remote.data));
+        } else {
+          state = Object.assign(freshState(), remote.data);
+          cloud.dirty = false;
+        }
+        persistLocal();
+        received = true;
       }
+      cloud.sha = remote.sha;
+
+      // 2. Envoyer nos changements
+      if (!cloud.dirty && !cloud.force && remote.data) break;
       const body = { message: `Sauvegarde ${new Date().toLocaleString('fr-FR')}`, content: b64encode(JSON.stringify(state, null, 1)) };
       if (cloud.sha) body.sha = cloud.sha;
       const r = await gh(CLOUD_FILE, { method: 'PUT', body: JSON.stringify(body) });
       if (r.ok) {
         cloud.sha = (await r.json()).content.sha;
-        cloud.last = new Date().toISOString();
-        cloud.status = 'ok'; cloud.dirty = false;
-        saveCloud();
-        if (manual) toast('☁️ Sauvegardé dans le cloud');
+        cloud.dirty = false; cloud.force = false;
         break;
       }
-      if (r.status === 409 || r.status === 422) { cloud.sha = null; continue; } // version changée : on recommence
+      if (r.status === 409 || r.status === 422) continue; // un autre appareil vient d'écrire : on recommence
       throw r;
     }
+    cloud.last = new Date().toISOString();
+    cloud.status = 'ok';
+    saveCloud();
+    if (received) { render(); toast('🔄 Synchronisé avec ton autre appareil'); }
+    else if (manual) toast('☁️ Synchronisé');
   } catch (e) {
-    cloud.status = e && e.status === 401 ? 'auth' : e && e.status === 404 ? 'repo' : e && e.status === 403 ? 'auth' : 'error';
+    cloud.status = e && (e.status === 401 || e.status === 403) ? 'auth' : e && e.status === 404 ? 'repo' : 'error';
     saveCloud();
     if (manual) toast(cloudStatusText());
   } finally {
@@ -160,22 +220,21 @@ async function cloudBackup(manual = false) {
 }
 
 async function cloudRestore() {
-  const r = await gh(CLOUD_FILE);
-  if (!r.ok) { toast(r.status === 404 ? 'Aucune sauvegarde dans le cloud pour l’instant' : 'Connexion au cloud impossible'); return; }
-  const file = await r.json();
-  const data = JSON.parse(b64decode(file.content));
-  confirmSheet('Restaurer depuis le cloud ?', `Sauvegarde avec ${data.transactions.length} opérations. Tes données actuelles seront remplacées.`, 'Restaurer', () => {
-    state = Object.assign(freshState(), data);
-    cloud.sha = file.sha;
-    save(); render();
-    toast('✓ Données restaurées');
+  let remote;
+  try { remote = await readRemote(); } catch (e) { toast('Connexion au cloud impossible'); return; }
+  if (!remote.data) { toast('Rien dans le cloud pour l’instant'); return; }
+  confirmSheet('Reprendre la version du cloud ?', `Version avec ${remote.data.transactions.length} opérations. Les données de cet appareil seront remplacées.`, 'Remplacer', () => {
+    state = Object.assign(freshState(), remote.data);
+    cloud.sha = remote.sha; cloud.dirty = false; cloud.force = false; saveCloud();
+    persistLocal(); render();
+    toast('✓ Données récupérées');
   });
 }
 
 function cloudStatusText() {
   if (!cloudReady()) return 'Non activée';
   switch (cloud.status) {
-    case 'ok': return `✓ Dernière sauvegarde ${timeAgo(cloud.last)}`;
+    case 'ok': return `✓ Synchronisé ${timeAgo(cloud.last)}`;
     case 'auth': return '⚠️ Jeton refusé ou expiré : recrée-en un';
     case 'repo': return '⚠️ Dépôt introuvable : vérifie son nom';
     case 'offline': return 'Hors ligne : envoi dès le retour du réseau';
@@ -194,11 +253,13 @@ function timeAgo(iso) {
   return `le ${new Date(iso).toLocaleDateString('fr-FR', { day: 'numeric', month: 'short' })}`;
 }
 
-// Rattrape un envoi en attente (réseau revenu, appli rouverte)
-window.addEventListener('online', () => { if (cloud.dirty) cloudBackup(); });
+// Synchro : à l'ouverture, au retour dans l'appli, toutes les minutes, et avant de quitter
+window.addEventListener('online', () => cloudSync());
 document.addEventListener('visibilitychange', () => {
-  if (document.hidden && cloud.dirty) { clearTimeout(cloudTimer); cloudBackup(); }
+  if (document.hidden) { if (cloud.dirty) { clearTimeout(cloudTimer); cloudSync(); } }
+  else cloudSync();
 });
+setInterval(() => { if (!document.hidden) cloudSync(); }, 60000);
 
 if (navigator.storage && navigator.storage.persist) {
   navigator.storage.persist().catch(() => {});
@@ -753,7 +814,7 @@ function renderSettings() {
         <select data-setting="startDay">${days.map((d) => `<option value="${d}" ${s.startDay === d ? 'selected' : ''}>le ${d}</option>`).join('')}</select></div>
     </div>
 
-    <div class="section-title">☁️ Sauvegarde automatique</div>
+    <div class="section-title">☁️ Synchro iPhone ↔ ordinateur</div>
     ${cloudSettings()}
 
     <div class="section-title">Copies sur le téléphone</div>
@@ -1177,7 +1238,8 @@ function download(name, content, type) {
 function cloudSettings() {
   if (!cloudReady()) {
     return `<div class="card help">
-      Chaque modification sera envoyée toute seule dans ton dépôt GitHub <b>privé</b>. Personne d'autre ne peut le voir. Même si l'iPhone efface les données de Safari, tu récupères tout.
+      Tes données sont envoyées toutes seules dans ton dépôt GitHub <b>privé</b> (personne d'autre ne peut le voir) et <b>synchronisées entre ton iPhone et ton ordinateur</b>. Même si un appareil efface ses données, tu récupères tout.
+      <div class="hint" style="margin-top:6px">Déjà activé sur un autre appareil ? Va dans ses Réglages, touche <b>Copier mon jeton</b>, puis colle-le ci-dessous.</div>
       <ol>
         <li>Touche <b>Créer mon jeton</b> ci-dessous (connecte-toi à GitHub si besoin)</li>
         <li>Expiration : choisis la plus longue (ou <b>No expiration</b>)</li>
@@ -1189,15 +1251,16 @@ function cloudSettings() {
          href="https://github.com/settings/personal-access-tokens/new?name=ETR%20BUDGET%20sauvegarde&description=Sauvegarde%20auto%20ETR%20BUDGET&target_name=${encodeURIComponent(DEFAULT_REPO.split('/')[0])}&contents=write">🔑 Créer mon jeton</a>
       <div class="field" style="margin-top:12px"><label>Dépôt privé</label><input class="input" id="cloudRepo" value="${esc(DEFAULT_REPO)}" autocapitalize="off" autocorrect="off" spellcheck="false"></div>
       <div class="field"><label>Jeton</label><input class="input" id="cloudToken" type="password" placeholder="github_pat_…" autocapitalize="off" autocorrect="off" spellcheck="false"></div>
-      <button class="btn" data-action="cloud-connect">Activer la sauvegarde automatique</button>
+      <button class="btn" data-action="cloud-connect">Activer la synchro</button>
     </div>`;
   }
   return `<div class="card help">
     <div style="display:flex;justify-content:space-between;gap:8px"><span>Statut</span><b style="text-align:right">${esc(cloudStatusText())}</b></div>
     <div class="small muted" style="margin-top:4px">Dépôt privé : ${esc(cloud.repo)}</div>
     <div style="margin-top:12px">
-      <button class="btn secondary" data-action="cloud-now">☁️ Sauvegarder maintenant</button>
-      <button class="btn secondary" data-action="cloud-restore">⤵️ Restaurer depuis le cloud</button>
+      <button class="btn secondary" data-action="cloud-now">🔄 Synchroniser maintenant</button>
+      <button class="btn secondary" data-action="cloud-copy-token">🔑 Copier mon jeton (pour un autre appareil)</button>
+      <button class="btn secondary" data-action="cloud-restore">⤵️ Remplacer par la version du cloud</button>
       <button class="btn danger" data-action="cloud-off">Désactiver</button>
     </div>
   </div>`;
@@ -1218,14 +1281,11 @@ async function cloudConnect() {
     const info = await r.json();
     if (!info.private) { toast('⚠️ Ce dépôt est public : choisis un dépôt privé'); cloud = {}; return; }
   } catch (e) { toast('Pas de connexion internet'); cloud = {}; return; }
+  // Appareil vide : il reprend les données du cloud. Sinon : on fusionne avec le cloud.
+  cloud.dirty = !isEmptyState(state);
   saveCloud();
   render();
-  const existing = await gh(CLOUD_FILE);
-  if (existing.ok && !state.transactions.length && !state.incomes.length) {
-    cloudRestore(); // téléphone vide + sauvegarde existante : on propose de récupérer
-  } else {
-    await cloudBackup(true);
-  }
+  await cloudSync(true);
 }
 
 function exportJSON() {
@@ -1249,8 +1309,7 @@ function importJSON(file) {
       const data = JSON.parse(reader.result);
       if (!data || !Array.isArray(data.categories) || !Array.isArray(data.transactions)) throw new Error('format');
       confirmSheet('Restaurer cette sauvegarde ?', `Elle contient ${data.transactions.length} opérations. Tes données actuelles seront remplacées.`, 'Restaurer', () => {
-        state = Object.assign(freshState(), data);
-        save(); render();
+        replaceState(data); render();
         toast('✓ Sauvegarde restaurée');
       });
     } catch (e) {
@@ -1294,7 +1353,13 @@ $view.addEventListener('pointerout', (e) => {
 /* ---------------- Événements ---------------- */
 
 function find(list, id) { return list.find((x) => x.id === id); }
-function remove(list, id) { const i = list.findIndex((x) => x.id === id); if (i >= 0) list.splice(i, 1); }
+function remove(list, id) {
+  const i = list.findIndex((x) => x.id === id);
+  if (i >= 0) list.splice(i, 1);
+  // Mémorise la suppression pour que la synchro ne fasse pas réapparaître l'élément
+  state.deleted = state.deleted || {};
+  state.deleted[id] = new Date().toISOString();
+}
 
 document.addEventListener('click', (e) => {
   const tabBtn = e.target.closest('[data-tab]');
@@ -1382,7 +1447,10 @@ document.addEventListener('click', (e) => {
     }
     case 'export-json': exportJSON(); break;
     case 'cloud-connect': cloudConnect(); break;
-    case 'cloud-now': cloudBackup(true); break;
+    case 'cloud-now': cloudSync(true); break;
+    case 'cloud-copy-token':
+      navigator.clipboard.writeText(cloud.token).then(() => toast('🔑 Jeton copié : colle-le sur ton autre appareil'), () => toast('Copie impossible'));
+      break;
     case 'cloud-restore': cloudRestore(); break;
     case 'cloud-off':
       confirmSheet('Désactiver la sauvegarde cloud ?', 'Le jeton sera oublié sur ce téléphone. Les sauvegardes déjà envoyées restent dans ton dépôt.', 'Désactiver', () => {
@@ -1394,15 +1462,15 @@ document.addEventListener('click', (e) => {
       const snap = readJSON(SNAP_KEY, [])[+el.dataset.i];
       closeSheet();
       confirmSheet('Revenir à cette copie ?', `Copie du ${new Date(snap.at).toLocaleString('fr-FR')}. Les changements faits depuis seront perdus.`, 'Revenir à cette copie', () => {
-        state = Object.assign(freshState(), snap.data); save(); render(); toast('✓ Copie restaurée');
+        replaceState(snap.data); render(); toast('✓ Copie restaurée');
       });
       break;
     }
     case 'export-csv': exportCSV(); break;
     case 'import-json': document.getElementById('importFile').click(); break;
     case 'reset':
-      confirmSheet('Tout effacer ?', 'Toutes tes opérations, enveloppes, revenus et objectifs seront supprimés de ce téléphone. Pense à faire une sauvegarde avant.', 'Tout effacer', () => {
-        state = freshState(); save(); ui.offset = 0; ui.tab = 'home'; render();
+      confirmSheet('Tout effacer ?', `Toutes tes opérations, enveloppes, revenus et objectifs seront supprimés${cloudReady() ? ' sur <b>tous tes appareils synchronisés</b>' : ' de cet appareil'}. Une copie reste dans « Copies sur le téléphone ».`, 'Tout effacer', () => {
+        replaceState(freshState()); ui.offset = 0; ui.tab = 'home'; render();
       });
       break;
   }
@@ -1423,7 +1491,7 @@ document.addEventListener('visibilitychange', () => { if (!document.hidden && $s
 
 render();
 handleIncomingLink();
-if (cloud.dirty || (cloudReady() && cloud.last && Date.now() - new Date(cloud.last) > 864e5)) cloudBackup();
+cloudSync();
 
 if ('serviceWorker' in navigator && location.protocol !== 'file:') {
   navigator.serviceWorker.register('sw.js?v=' + APP_VERSION).catch(() => {});
@@ -1445,7 +1513,7 @@ async function checkForUpdate() {
       sessionStorage.setItem('etr-tried', version);
       const reg = navigator.serviceWorker && await navigator.serviceWorker.getRegistration();
       if (reg) await reg.update().catch(() => {});
-      if (cloud.dirty) await cloudBackup();
+      if (cloud.dirty) await cloudSync();
       sessionStorage.setItem('etr-updated', version);
       location.reload();
     }
