@@ -5,3 +5,4 @@ budget-operations-*.csv
 text.txt
 .wrangler/
 node_modules/
+raccourci/*.shortcut

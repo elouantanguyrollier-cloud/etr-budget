@@ -5,7 +5,7 @@
    Montants en centimes (entiers) pour éviter les erreurs d'arrondi.
    ========================================================= */
 
-const APP_VERSION = '1.6';
+const APP_VERSION = '1.7';
 const STORE_KEY = 'etr-budget-v1';
 
 const DEFAULT_CATEGORIES = [
@@ -850,26 +850,26 @@ function renderSettings() {
       <input type="file" id="importFile" accept="application/json,.json" hidden>
     </div>
 
-    <div class="section-title">⚡ Saisie automatique (Apple Pay)</div>
+    <div class="section-title">⚡ Ajouter une dépense en 2 secondes</div>
     <div class="card help">
-      À chaque paiement Apple Pay, l'iPhone peut envoyer la dépense ici : elle est rangée dans la bonne enveloppe d'après le commerçant (Lidl → Courses…). Si je ne connais pas le commerçant, je te demande une fois puis je m'en souviens.
-      <div style="margin-top:12px"><b>① Teste d'abord que l'appli sait recevoir</b></div>
-      <button class="btn secondary" style="margin-top:8px" data-action="test-auto">Simuler un paiement de 12,50 € chez Lidl</button>
-      <div style="margin-top:14px"><b>② Dans l'app Raccourcis</b></div>
+      Un raccourci pour ton iPhone : tu appuies sur le <b>bouton Action</b>, tu tapes le montant et le commerçant, et la dépense est rangée toute seule dans la bonne enveloppe (Lidl → Courses…). Je m'en souviens pour les prochaines fois.
       <ol>
-        <li>Onglet <b>Automatisation</b> → <b>+</b> (ou « Nouvelle automatisation ») → cherche <b>Transaction</b>.</li>
-        <li><b>Quand je touche</b> : choisis ta carte, puis <b>Suivant</b>. S'il existe une option <b>Exécuter immédiatement</b>, choisis-la, sinon tu recevras une notification à toucher à chaque paiement.</li>
-        <li>Touche <b>Nouveau raccourci vide</b> (ou « Ajouter une action »), cherche <b>Ouvrir les URL</b> et ajoute-la.</li>
-        <li>Touche le champ de l'URL et colle le lien ci-dessous (bouton « Copier le lien »).</li>
-        <li>Touche le mot <code>MONTANT</code> pour le sélectionner, supprime-le, puis dans la barre au-dessus du clavier choisis la variable <b>Montant</b>. Si tu vois seulement « Entrée du raccourci », touche-la puis choisis <b>Montant</b>.</li>
-        <li>Fais pareil pour <code>MARCHAND</code> avec la variable <b>Marchand</b>.</li>
-        <li><b>OK</b>, puis <b>Terminé</b>.</li>
+        <li>Touche <b>Télécharger le raccourci</b>, puis ouvre le fichier téléchargé (ou touche « Ouvrir dans Raccourcis »).</li>
+        <li>Dans Raccourcis, touche <b>Ajouter le raccourci</b>.</li>
+        <li>Lance-le une fois pour tester : tape <b>12,50</b> puis <b>Lidl</b>. Safari s'ouvre avec ta dépense.</li>
+        <li>Pour le mettre sur le bouton : <b>Réglages de l'iPhone → Bouton Action → Raccourci</b> → choisis <b>Dépense ETR</b>.</li>
       </ol>
-      <div class="input small num" style="margin-top:10px;overflow-wrap:anywhere;word-break:break-all;user-select:all;-webkit-user-select:all">${esc(autoUrl())}</div>
-      <button class="btn secondary" style="margin-top:8px" data-action="copy-url" data-url="${esc(autoUrl())}">Copier le lien</button>
-      <div style="margin-top:14px"><b>③ Où s'ouvre la dépense ?</b></div>
-      <div class="hint">Raccourcis ouvre le lien dans <b>Safari</b>, pas dans l'icône plein écran, et les deux ont des données séparées. Pour que tout soit au même endroit : active la <b>synchro</b> (plus haut) <b>dans l'icône ET dans Safari</b> avec le même lien de synchro. Ensuite chaque dépense reçue dans Safari arrive dans l'icône en moins d'une minute.</div>
-      <div class="hint" style="margin-top:10px">Seuls les paiements <b>Apple Pay</b> sont captés (iPhone ou Apple Watch). La carte physique, les retraits et les prélèvements s'ajoutent avec le bouton <b>+</b>. Apple signale que ce déclencheur est parfois capricieux : vérifie avec un petit achat.</div>
+      <a class="btn" style="text-decoration:none;margin-top:10px" href="Depense-ETR.shortcut" download="Depense-ETR.shortcut">⬇️ Télécharger le raccourci</a>
+      <div class="hint" style="margin-top:12px"><b>Une seule fois :</b> le raccourci ouvre Safari, qui a ses propres données. Pour que tout arrive dans ton icône, ouvre ton lien de synchro <b>dans Safari</b> :</div>
+      ${cloudReady() ? `<button class="btn secondary" style="margin-top:8px" data-action="cloud-copy-link">🔗 Copier le lien de synchro</button><div class="hint">Puis ouvre Safari, colle-le dans la barre d'adresse et valide.</div>` : `<div class="hint">Active d'abord la synchro (plus haut).</div>`}
+      <div style="margin-top:14px"><b>Vérifier que l'appli reçoit bien</b></div>
+      <button class="btn secondary" style="margin-top:8px" data-action="test-auto">Simuler un paiement de 12,50 € chez Lidl</button>
+      <details style="margin-top:14px">
+        <summary style="font-weight:650;cursor:pointer">Entièrement automatique avec Apple Pay (si ton iPhone le propose)</summary>
+        <div class="hint" style="margin-top:8px">Dans Raccourcis → Automatisation → <b>+</b>, cherche <b>Transaction</b> : ce déclencheur n'est pas disponible partout. S'il existe, ajoute l'action <b>Ouvrir les URL</b> avec ce lien en remplaçant <code>MONTANT</code> et <code>MARCHAND</code> par les variables <b>Montant</b> et <b>Marchand</b> :</div>
+        <div class="input small num" style="margin-top:8px;overflow-wrap:anywhere;word-break:break-all;user-select:all;-webkit-user-select:all">${esc(autoUrl())}</div>
+        <button class="btn secondary" style="margin-top:8px" data-action="copy-url" data-url="${esc(autoUrl())}">Copier le lien</button>
+      </details>
     </div>
 
     <div class="section-title">Installer sur l'iPhone</div>
