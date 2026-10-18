@@ -1,19 +1,25 @@
 import plistlib, uuid, sys
 
 APP_URL = "https://elouantanguyrollier-cloud.github.io/etr-budget/"
-U_AMOUNT, U_MERCHANT, U_URL = (str(uuid.uuid4()).upper() for _ in range(3))
+U_CODE, U_AMOUNT, U_MERCHANT, U_URL = (str(uuid.uuid4()).upper() for _ in range(4))
 
 def ref(uid, name):
     return {"OutputUUID": uid, "OutputName": name, "Type": "ActionOutput"}
 
-# URL = APP_URL#ajout?montant=<Montant>&marchand=<Commerçant>
-prefix = APP_URL + "#ajout?montant="
-mid = "&marchand="
-text = prefix + "￼" + mid + "￼"
-pos1 = len(prefix)
-pos2 = pos1 + 1 + len(mid)
+# URL = APP_URL#ajout?montant=<Montant>&marchand=<Commerçant>&sync=<Code>
+p1 = APP_URL + "#ajout?montant="
+p2 = "&marchand="
+p3 = "&sync="
+text = p1 + "\ufffc" + p2 + "\ufffc" + p3 + "\ufffc"
+pos1 = len(p1)
+pos2 = pos1 + 1 + len(p2)
+pos3 = pos2 + 1 + len(p3)
 
 actions = [
+    {   # 0. Code de synchro (demandé une seule fois, à l'ajout du raccourci)
+        "WFWorkflowActionIdentifier": "is.workflow.actions.gettext",
+        "WFWorkflowActionParameters": {"UUID": U_CODE, "WFTextActionText": ""},
+    },
     {   # 1. Demander le montant
         "WFWorkflowActionIdentifier": "is.workflow.actions.ask",
         "WFWorkflowActionParameters": {
@@ -40,6 +46,7 @@ actions = [
                     "attachmentsByRange": {
                         "{%d, 1}" % pos1: ref(U_AMOUNT, "Fourni lors de l’exécution"),
                         "{%d, 1}" % pos2: ref(U_MERCHANT, "Fourni lors de l’exécution"),
+                        "{%d, 1}" % pos3: ref(U_CODE, "Texte"),
                     },
                 },
                 "WFSerializationType": "WFTextTokenString",
@@ -64,7 +71,13 @@ shortcut = {
     "WFWorkflowMinimumClientVersionString": "900",
     "WFWorkflowHasShortcutInputVariables": False,
     "WFWorkflowIcon": {"WFWorkflowIconStartColor": 4282601983, "WFWorkflowIconGlyphNumber": 59511},
-    "WFWorkflowImportQuestions": [],
+    "WFWorkflowImportQuestions": [{
+        "ParameterKey": "WFTextActionText",
+        "Category": "Parameter",
+        "ActionIndex": 0,
+        "Text": "Colle ici ton code de synchro (appli ETR BUDGET → Réglages → Copier mon code de synchro).",
+        "DefaultValue": "",
+    }],
     "WFWorkflowInputContentItemClasses": [],
     "WFWorkflowTypes": [],
 }

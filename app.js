@@ -5,7 +5,7 @@
    Montants en centimes (entiers) pour éviter les erreurs d'arrondi.
    ========================================================= */
 
-const APP_VERSION = '1.8';
+const APP_VERSION = '1.9';
 const STORE_KEY = 'etr-budget-v1';
 
 const DEFAULT_CATEGORIES = [
@@ -99,7 +99,8 @@ let cloudBusy = false;
 
 const saveCloud = () => writeJSON(CLOUD_KEY, cloud);
 const cloudReady = () => !!cloud.code;
-const isEmptyState = (s) => !s.transactions.length && !s.incomes.length && !s.fixed.length && !s.goals.length;
+// « Vide » = pas encore de vrai budget (quelques dépenses de test ne comptent pas) : l'appareil adopte alors les données du cloud
+const isEmptyState = (s) => !s.incomes.length && !s.fixed.length && !s.goals.length;
 
 function scheduleCloudBackup() {
   if (!cloudReady()) return;
@@ -856,14 +857,14 @@ function renderSettings() {
     <div class="card help">
       Un raccourci pour ton iPhone : tu appuies sur le <b>bouton Action</b>, tu tapes le montant et le commerçant, et la dépense est rangée toute seule dans la bonne enveloppe (Lidl → Courses…). Je m'en souviens pour les prochaines fois.
       <ol>
-        <li>Touche <b>Télécharger le raccourci</b>, puis ouvre le fichier téléchargé (ou touche « Ouvrir dans Raccourcis »).</li>
-        <li>Dans Raccourcis, touche <b>Ajouter le raccourci</b>.</li>
-        <li>Lance-le une fois pour tester : tape <b>12,50</b> puis <b>Lidl</b>. Safari s'ouvre avec ta dépense.</li>
+        <li>Touche d'abord <b>Copier mon code de synchro</b> ci-dessous.</li>
+        <li>Touche <b>Télécharger le raccourci</b>, ouvre le fichier, puis dans Raccourcis touche <b>Configurer</b> : <b>colle</b> ce que tu viens de copier, puis <b>Ajouter le raccourci</b>.</li>
+        <li>Lance-le une fois pour tester : tape <b>12,50</b> puis <b>Lidl</b>. Safari s'ouvre et récupère tes données tout seul.</li>
         <li>Pour le mettre sur le bouton : <b>Réglages de l'iPhone → Bouton Action → Raccourci</b> → choisis <b>Dépense ETR</b>.</li>
       </ol>
-      <a class="btn" style="text-decoration:none;margin-top:10px" href="Depense-ETR.shortcut" download="Depense-ETR.shortcut">⬇️ Télécharger le raccourci</a>
-      <div class="hint" style="margin-top:12px"><b>Une seule fois :</b> le raccourci ouvre Safari, qui a ses propres données. Pour que tout arrive dans ton icône, ouvre ton lien de synchro <b>dans Safari</b> :</div>
-      ${cloudReady() ? `<button class="btn secondary" style="margin-top:8px" data-action="cloud-copy-link">🔗 Copier le lien de synchro</button><div class="hint">Puis ouvre Safari, colle-le dans la barre d'adresse et valide.</div>` : `<div class="hint">Active d'abord la synchro (plus haut).</div>`}
+      ${cloudReady() ? `<button class="btn secondary" style="margin-top:10px" data-action="cloud-copy-code">📋 Copier mon code de synchro</button>` : `<div class="alert warn" style="margin-top:10px"><span class="ai">⚠️</span><div>Active d'abord la synchro (plus haut) : le raccourci en a besoin.</div></div>`}
+      <a class="btn" style="text-decoration:none;margin-top:8px" href="Depense-ETR.shortcut" download="Depense-ETR.shortcut">⬇️ Télécharger le raccourci</a>
+      <div class="hint" style="margin-top:10px">Tu avais déjà une version du raccourci ? Supprime-la dans Raccourcis avant d'ajouter celle-ci.</div>
       <div style="margin-top:14px"><b>Vérifier que l'appli reçoit bien</b></div>
       <button class="btn secondary" style="margin-top:8px" data-action="test-auto">Simuler un paiement de 12,50 € chez Lidl</button>
       <details style="margin-top:14px">
@@ -1214,11 +1215,27 @@ function prettyMerchant(m) {
   return t;
 }
 
-function handleIncomingLink() {
+// Extrait le code de synchro d'un texte : le code seul ou un lien complet « …#sync=CODE »
+function extractSyncCode(text) {
+  const t = String(text || '').trim();
+  const part = t.includes('sync=') ? t.slice(t.indexOf('sync=') + 5) : t;
+  const m = part.match(/^[A-Za-z0-9_-]{43}/);
+  return m ? m[0] : null;
+}
+
+async function handleIncomingLink() {
   const h = decodeURIComponent(location.hash.replace(/\+/g, ' ')).trim();
   if (!/^#ajout/i.test(h)) return;
   const params = new URLSearchParams(h.slice(h.indexOf('?') + 1));
   history.replaceState(null, '', location.pathname + location.search);
+  // Le raccourci transporte le code de synchro : Safari se relie tout seul à tes données,
+  // et récupère tes réglages (enveloppes, commerçants appris) avant de classer la dépense.
+  const code = extractSyncCode(params.get('sync'));
+  if (code && cloud.code !== code) { cloud = { code, dirty: false }; saveCloud(); }
+  if (cloudReady()) {
+    toast('🔄 Récupération de tes données…', 4000);
+    await Promise.race([cloudSync(), new Promise((r) => setTimeout(r, 6000))]);
+  }
   const raw = params.get('montant') || params.get('amount') || '';
   const amount = Math.abs(parseAmount(raw));
   if (!(amount > 0)) { toast(`⚠️ Montant illisible (« ${raw || 'vide'} »). Ajoute la dépense à la main`, 5000); return; }
@@ -1240,9 +1257,9 @@ function handleIncomingLink() {
   } else {
     feedbackAfterExpense(tx);
   }
-  // Ouvert dans Safari (pas dans l'icône plein écran) : les données ne sont pas partagées sans synchro
-  if (!navigator.standalone && !cloudReady() && (state.transactions.length < 3 || !state.incomes.length)) {
-    setTimeout(() => toast('ℹ️ Ici ce sont les données de Safari. Active la synchro (Réglages) pour retrouver tes dépenses dans l’icône.', 6000), 3800);
+  // Ouvert sans synchro (lien sans code) : les données de Safari sont séparées de celles de l'icône
+  if (!cloudReady()) {
+    setTimeout(() => toast('ℹ️ Cette dépense reste dans Safari. Réinstalle le raccourci pour qu’elle arrive dans ton icône.', 7000), 3800);
   }
 }
 
@@ -1714,6 +1731,9 @@ document.addEventListener('click', (e) => {
     case 'import-bank': document.getElementById('bankFile').click(); break;
     case 'cloud-create': cloudCreate(); break;
     case 'cloud-now': cloudSync(true); break;
+    case 'cloud-copy-code':
+      navigator.clipboard.writeText(cloud.code).then(() => toast('📋 Code copié : colle-le quand Raccourcis te le demande', 5000), () => toast('Copie impossible'));
+      break;
     case 'cloud-copy-link':
       navigator.clipboard.writeText(syncLink()).then(() => toast('🔗 Lien copié : ouvre-le sur ton autre appareil (AirDrop, message, note)', 5000), () => toast('Copie impossible'));
       break;
