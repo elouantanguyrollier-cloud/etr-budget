@@ -1,5 +1,5 @@
 // Cache hors-ligne : l'appli s'ouvre même sans réseau.
-const CACHE = 'etr-budget-v10';
+const CACHE = 'etr-budget-v11';
 const FILES = ['./', 'index.html', 'style.css', 'app.js', 'manifest.webmanifest',
   'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png'];
 

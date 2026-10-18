@@ -1,6 +1,7 @@
 import plistlib, uuid, sys
 
 APP_URL = "https://elouantanguyrollier-cloud.github.io/etr-budget/"
+PLACEHOLDER = "COLLE-TON-CODE-ICI"
 U_CODE, U_AMOUNT, U_MERCHANT, U_URL = (str(uuid.uuid4()).upper() for _ in range(4))
 
 def ref(uid, name):
@@ -18,7 +19,7 @@ pos3 = pos2 + 1 + len(p3)
 actions = [
     {   # 0. Code de synchro (demandé une seule fois, à l'ajout du raccourci)
         "WFWorkflowActionIdentifier": "is.workflow.actions.gettext",
-        "WFWorkflowActionParameters": {"UUID": U_CODE, "WFTextActionText": ""},
+        "WFWorkflowActionParameters": {"UUID": U_CODE, "WFTextActionText": PLACEHOLDER},
     },
     {   # 1. Demander le montant
         "WFWorkflowActionIdentifier": "is.workflow.actions.ask",
@@ -71,13 +72,7 @@ shortcut = {
     "WFWorkflowMinimumClientVersionString": "900",
     "WFWorkflowHasShortcutInputVariables": False,
     "WFWorkflowIcon": {"WFWorkflowIconStartColor": 4282601983, "WFWorkflowIconGlyphNumber": 59511},
-    "WFWorkflowImportQuestions": [{
-        "ParameterKey": "WFTextActionText",
-        "Category": "Parameter",
-        "ActionIndex": 0,
-        "Text": "Colle ici ton code de synchro (appli ETR BUDGET → Réglages → Copier mon code de synchro).",
-        "DefaultValue": "",
-    }],
+    "WFWorkflowImportQuestions": [],
     "WFWorkflowInputContentItemClasses": [],
     "WFWorkflowTypes": [],
 }

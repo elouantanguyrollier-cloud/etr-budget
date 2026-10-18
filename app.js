@@ -5,7 +5,7 @@
    Montants en centimes (entiers) pour éviter les erreurs d'arrondi.
    ========================================================= */
 
-const APP_VERSION = '1.9';
+const APP_VERSION = '2.0';
 const STORE_KEY = 'etr-budget-v1';
 
 const DEFAULT_CATEGORIES = [
@@ -858,7 +858,8 @@ function renderSettings() {
       Un raccourci pour ton iPhone : tu appuies sur le <b>bouton Action</b>, tu tapes le montant et le commerçant, et la dépense est rangée toute seule dans la bonne enveloppe (Lidl → Courses…). Je m'en souviens pour les prochaines fois.
       <ol>
         <li>Touche d'abord <b>Copier mon code de synchro</b> ci-dessous.</li>
-        <li>Touche <b>Télécharger le raccourci</b>, ouvre le fichier, puis dans Raccourcis touche <b>Configurer</b> : <b>colle</b> ce que tu viens de copier, puis <b>Ajouter le raccourci</b>.</li>
+        <li>Touche <b>Télécharger le raccourci</b>, ouvre le fichier et touche <b>Ajouter le raccourci</b>.</li>
+        <li>Dans l'app <b>Raccourcis</b>, ouvre <b>Dépense ETR</b> (touche <b>•••</b> sur sa carte), touche le texte <b>COLLE-TON-CODE-ICI</b> dans la 1re action « Texte », <b>colle</b> ton code à la place, puis <b>OK</b>.</li>
         <li>Lance-le une fois pour tester : tape <b>12,50</b> puis <b>Lidl</b>. Safari s'ouvre et récupère tes données tout seul.</li>
         <li>Pour le mettre sur le bouton : <b>Réglages de l'iPhone → Bouton Action → Raccourci</b> → choisis <b>Dépense ETR</b>.</li>
       </ol>
@@ -1232,6 +1233,9 @@ async function handleIncomingLink() {
   // et récupère tes réglages (enveloppes, commerçants appris) avant de classer la dépense.
   const code = extractSyncCode(params.get('sync'));
   if (code && cloud.code !== code) { cloud = { code, dirty: false }; saveCloud(); }
+  if (!code && params.has('sync') && !cloudReady()) {
+    setTimeout(() => toast('⚠️ Le raccourci n’a pas ton code de synchro : ouvre-le dans Raccourcis, touche la 1re action « Texte » et colle ton code à la place de COLLE-TON-CODE-ICI.', 9000), 600);
+  }
   if (cloudReady()) {
     toast('🔄 Récupération de tes données…', 4000);
     await Promise.race([cloudSync(), new Promise((r) => setTimeout(r, 6000))]);
