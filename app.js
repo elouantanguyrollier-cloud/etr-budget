@@ -5,7 +5,7 @@
    Montants en centimes (entiers) pour éviter les erreurs d'arrondi.
    ========================================================= */
 
-const APP_VERSION = '1.3';
+const APP_VERSION = '1.4';
 const STORE_KEY = 'etr-budget-v1';
 
 const DEFAULT_CATEGORIES = [
@@ -274,8 +274,11 @@ const eurShort = (c) => (Math.abs(c) >= 100000 ? eur0Fmt.format(c / 100) : eur(c
 
 function parseAmount(str) {
   if (str == null) return NaN;
-  const clean = String(str).replace(/\s/g, '').replace('€', '').replace(',', '.');
+  // Accepte « 12,50 € », « 1 234,50 », « €12.50 », « -12,50 EUR »
+  let clean = String(str).replace(/[\s\u00a0\u202f]/g, '').replace(/€|eur/gi, '');
   if (clean === '') return NaN;
+  if (clean.includes(',') && clean.includes('.')) clean = clean.replace(/\./g, ''); // 1.234,50
+  clean = clean.replace(',', '.');
   const n = Number(clean);
   return Number.isFinite(n) ? Math.round(n * 100) : NaN;
 }
@@ -837,16 +840,24 @@ function renderSettings() {
 
     <div class="section-title">⚡ Saisie automatique (Apple Pay)</div>
     <div class="card help">
-      À chaque paiement avec Apple Pay, l'iPhone peut envoyer la dépense ici toute seule : elle est rangée dans la bonne enveloppe d'après le commerçant (Lidl → Courses, etc.). Quand je ne connais pas un commerçant, je te demande une fois puis je m'en souviens.
+      À chaque paiement Apple Pay, l'iPhone peut envoyer la dépense ici : elle est rangée dans la bonne enveloppe d'après le commerçant (Lidl → Courses…). Si je ne connais pas le commerçant, je te demande une fois puis je m'en souviens.
+      <div style="margin-top:12px"><b>① Teste d'abord que l'appli sait recevoir</b></div>
+      <button class="btn secondary" style="margin-top:8px" data-action="test-auto">Simuler un paiement de 12,50 € chez Lidl</button>
+      <div style="margin-top:14px"><b>② Dans l'app Raccourcis</b></div>
       <ol>
-        <li>Ouvre l'app <b>Raccourcis</b>, onglet <b>Automatisation</b>, puis <b>+</b></li>
-        <li>Choisis <b>Transaction</b>, sélectionne ta carte, coche <b>Exécuter immédiatement</b>, puis <b>Suivant</b></li>
-        <li>Crée une automatisation vide et ajoute l'action <b>Encoder l'URL</b> : touche le champ et choisis la variable <b>Marchand</b></li>
-        <li>Ajoute l'action <b>Ouvrir les URL</b> et colle ce lien, puis remplace <code>MONTANT</code> par la variable <b>Montant</b> et <code>MARCHAND</code> par <b>Texte encodé en URL</b> :</li>
+        <li>Onglet <b>Automatisation</b> → <b>+</b> (ou « Nouvelle automatisation ») → cherche <b>Transaction</b>.</li>
+        <li><b>Quand je touche</b> : choisis ta carte, puis <b>Suivant</b>. S'il existe une option <b>Exécuter immédiatement</b>, choisis-la, sinon tu recevras une notification à toucher à chaque paiement.</li>
+        <li>Touche <b>Nouveau raccourci vide</b> (ou « Ajouter une action »), cherche <b>Ouvrir les URL</b> et ajoute-la.</li>
+        <li>Touche le champ de l'URL et colle le lien ci-dessous (bouton « Copier le lien »).</li>
+        <li>Touche le mot <code>MONTANT</code> pour le sélectionner, supprime-le, puis dans la barre au-dessus du clavier choisis la variable <b>Montant</b>. Si tu vois seulement « Entrée du raccourci », touche-la puis choisis <b>Montant</b>.</li>
+        <li>Fais pareil pour <code>MARCHAND</code> avec la variable <b>Marchand</b>.</li>
+        <li><b>OK</b>, puis <b>Terminé</b>.</li>
       </ol>
       <div class="input small num" style="margin-top:10px;overflow-wrap:anywhere;word-break:break-all;user-select:all;-webkit-user-select:all">${esc(autoUrl())}</div>
       <button class="btn secondary" style="margin-top:8px" data-action="copy-url" data-url="${esc(autoUrl())}">Copier le lien</button>
-      <div class="hint" style="margin-top:10px">Ça fonctionne seulement pour les paiements <b>Apple Pay</b> (iPhone ou Apple Watch). La carte physique, les retraits et les prélèvements ne passent pas par là : ajoute-les avec le bouton <b>+</b>.</div>
+      <div style="margin-top:14px"><b>③ Où s'ouvre la dépense ?</b></div>
+      <div class="hint">Raccourcis ouvre le lien dans <b>Safari</b>, pas dans l'icône plein écran, et les deux ont des données séparées. Pour que tout soit au même endroit : active la <b>synchro</b> (plus haut) <b>dans l'icône ET dans Safari</b> avec le même jeton. Ensuite chaque dépense reçue dans Safari arrive dans l'icône en moins d'une minute.</div>
+      <div class="hint" style="margin-top:10px">Seuls les paiements <b>Apple Pay</b> sont captés (iPhone ou Apple Watch). La carte physique, les retraits et les prélèvements s'ajoutent avec le bouton <b>+</b>. Apple signale que ce déclencheur est parfois capricieux : vérifie avec un petit achat.</div>
     </div>
 
     <div class="section-title">Installer sur l'iPhone</div>
@@ -854,7 +865,7 @@ function renderSettings() {
       <ol style="margin:0">
         <li>Ouvre cette page dans <b>Safari</b></li>
         <li>Touche <b>Partager</b> (carré avec une flèche), puis <b>« Sur l'écran d'accueil »</b></li>
-        <li><b>Important pour la saisie automatique</b> : <b>désactive</b> l'option <b>« Ouvrir en tant qu'app web »</b>. Sinon l'icône garde des données séparées de Safari, et les dépenses Apple Pay ne s'afficheraient pas.</li>
+        <li>Garde <b>« Ouvrir en tant qu'app web »</b> activé pour l'affichage plein écran, et active la synchro pour partager les données avec Safari.</li>
       </ol>
     </div>
 
@@ -1190,13 +1201,14 @@ function prettyMerchant(m) {
 }
 
 function handleIncomingLink() {
-  const h = location.hash;
-  if (!h.startsWith('#ajout')) return;
+  const h = decodeURIComponent(location.hash.replace(/\+/g, ' ')).trim();
+  if (!/^#ajout/i.test(h)) return;
   const params = new URLSearchParams(h.slice(h.indexOf('?') + 1));
   history.replaceState(null, '', location.pathname + location.search);
-  const amount = Math.abs(parseAmount(params.get('montant') || params.get('amount')));
-  if (!(amount > 0)) { toast("⚠️ Montant reçu illisible, ajoute la dépense à la main"); return; }
-  const merchant = prettyMerchant(params.get('marchand') || params.get('merchant') || '');
+  const raw = params.get('montant') || params.get('amount') || '';
+  const amount = Math.abs(parseAmount(raw));
+  if (!(amount > 0)) { toast(`⚠️ Montant illisible (« ${raw || 'vide'} »). Ajoute la dépense à la main`, 5000); return; }
+  const merchant = prettyMerchant(params.get('marchand') || params.get('merchant') || params.get('nom') || params.get('name') || '');
   const categoryId = guessCategory(merchant);
   const fallback = state.categories.find((c) => /autre/i.test(c.name)) || state.categories[state.categories.length - 1];
   const tx = {
@@ -1213,6 +1225,10 @@ function handleIncomingLink() {
     toast(`⚡ ${eur(amount)} ${merchant ? 'chez ' + merchant : ''} · choisis l'enveloppe`, 3500);
   } else {
     feedbackAfterExpense(tx);
+  }
+  // Ouvert dans Safari (pas dans l'icône plein écran) : les données ne sont pas partagées sans synchro
+  if (!navigator.standalone && !cloudReady() && (state.transactions.length < 3 || !state.incomes.length)) {
+    setTimeout(() => toast('ℹ️ Ici ce sont les données de Safari. Active la synchro (Réglages) pour retrouver tes dépenses dans l’icône.', 6000), 3800);
   }
 }
 
@@ -1431,6 +1447,9 @@ document.addEventListener('click', (e) => {
     case 'quick-income': recurringSheet('income', null, { name: el.dataset.name, emoji: el.dataset.emoji }); break;
     case 'quick-fixed': recurringSheet('fixed', null, { name: el.dataset.name, emoji: el.dataset.emoji }); break;
     case 'quick-goal': goalSheet(null, { name: el.dataset.name, emoji: el.dataset.emoji, kind: /PEA/.test(el.dataset.name) ? 'invest' : 'epargne' }); break;
+    case 'test-auto':
+      location.hash = '#ajout?montant=12,50%20%E2%82%AC&marchand=LIDL%20RENNES';
+      break;
     case 'copy-url':
       navigator.clipboard.writeText(el.dataset.url).then(() => toast('✓ Lien copié'), () => toast('Copie impossible, sélectionne le texte'));
       break;
