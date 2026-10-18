@@ -5,7 +5,7 @@
    Montants en centimes (entiers) pour éviter les erreurs d'arrondi.
    ========================================================= */
 
-const APP_VERSION = '2.5';
+const APP_VERSION = '2.6';
 const STORE_KEY = 'etr-budget-v1';
 
 const DEFAULT_CATEGORIES = [
@@ -494,6 +494,7 @@ function renderHome(p) {
         </div>
         <div style="margin-top:14px">
           <button class="btn" data-action="goto-budget" data-seg="income">Commencer</button>
+          <button class="btn secondary" data-action="goto-settings">🔗 J'ai déjà un code de synchro</button>
           <button class="btn secondary" data-action="dismiss-onboarding">Plus tard</button>
         </div>
       </div>`;
@@ -1256,8 +1257,11 @@ function cloudSettings() {
   if (!cloudReady()) {
     return `<div class="card help">
       Tes données sont <b>chiffrées</b> puis synchronisées entre tous tes appareils (iPhone, ordinateur…). Personne ne peut les lire, pas même le serveur.
-      <button class="btn" style="margin-top:12px" data-action="cloud-create">Activer la synchro</button>
-      <div class="hint" style="margin-top:10px">Déjà activée sur un autre appareil ? Ouvre simplement son <b>lien de synchro</b> ici (Réglages → Copier le lien de synchro, sur l'appareil déjà connecté).</div>
+      <div class="field" style="margin-top:14px"><label for="joinCode">Déjà synchronisé sur un autre appareil ?</label>
+        <input class="input" id="joinCode" placeholder="Colle ici ton lien ou ton code de synchro" autocapitalize="off" autocorrect="off" spellcheck="false"></div>
+      <button class="btn" data-action="cloud-join">Relier cet appareil</button>
+      <div class="hint" style="margin:14px 0 6px">Première fois, aucun autre appareil ? Crée ta synchro :</div>
+      <button class="btn secondary" data-action="cloud-create">Créer ma synchro</button>
     </div>`;
   }
   return `<div class="card help">
@@ -1279,6 +1283,22 @@ async function cloudCreate() {
   render();
   await cloudSync(true);
   if (cloud.status === 'ok') toast('✓ Synchro activée. Copie le lien pour ton autre appareil.', 5000);
+}
+
+// Relie cet appareil à une synchro existante (lien ou code collé dans l'appli)
+async function cloudJoin() {
+  const input = document.getElementById('joinCode');
+  const code = extractSyncCode(input && input.value);
+  if (!code) { toast('Je ne reconnais pas ce lien ou ce code. Copie-le à nouveau en entier.', 5000); return; }
+  const before = cloud;
+  cloud = { code, dirty: false };
+  try {
+    const remote = await readRemote();
+    if (!remote.data) { cloud = before; toast('Aucune donnée trouvée avec ce code. Vérifie qu’il est complet.', 6000); return; }
+  } catch (e) { cloud = before; toast('Impossible de joindre le serveur, ou code incorrect.', 5000); return; }
+  cloud.dirty = !isEmptyState(state);
+  saveCloud(); ui.tab = 'home'; render();
+  await cloudSync(true);
 }
 
 async function handleSyncLink() {
@@ -1699,6 +1719,8 @@ document.addEventListener('click', (e) => {
     case 'copy-transfer': copyTransferLink(); break;
     case 'import-bank': document.getElementById('bankFile').click(); break;
     case 'cloud-create': cloudCreate(); break;
+    case 'cloud-join': cloudJoin(); break;
+    case 'goto-settings': ui.tab = 'settings'; render(); window.scrollTo(0, 0); break;
     case 'cloud-now': cloudSync(true); break;
     case 'cloud-copy-code':
       navigator.clipboard.writeText(cloud.code).then(() => toast('📋 Code copié : colle-le quand Raccourcis te le demande', 5000), () => toast('Copie impossible'));
