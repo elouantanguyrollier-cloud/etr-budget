@@ -5,7 +5,7 @@
    Montants en centimes (entiers) pour éviter les erreurs d'arrondi.
    ========================================================= */
 
-const APP_VERSION = '1.4';
+const APP_VERSION = '1.5';
 const STORE_KEY = 'etr-budget-v1';
 
 const DEFAULT_CATEGORIES = [
@@ -831,6 +831,7 @@ function renderSettings() {
     <div class="section-title">Fichiers</div>
     <div class="card help">
       <div>
+        <button class="btn secondary" data-action="copy-transfer">📋 Copier un lien pour mon autre appareil</button>
         <button class="btn secondary" data-action="export-json">💾 Enregistrer un fichier de sauvegarde</button>
         <button class="btn secondary" data-action="import-json">📂 Restaurer une sauvegarde</button>
         <button class="btn secondary" data-action="export-csv">📄 Exporter en tableur (CSV)</button>
@@ -1255,7 +1256,7 @@ function cloudSettings() {
   if (!cloudReady()) {
     return `<div class="card help">
       Tes données sont envoyées toutes seules dans ton dépôt GitHub <b>privé</b> (personne d'autre ne peut le voir) et <b>synchronisées entre ton iPhone et ton ordinateur</b>. Même si un appareil efface ses données, tu récupères tout.
-      <div class="hint" style="margin-top:6px">Déjà activé sur un autre appareil ? Va dans ses Réglages, touche <b>Copier mon jeton</b>, puis colle-le ci-dessous.</div>
+      <div class="hint" style="margin-top:6px"><b>Le jeton n'existe pas encore :</b> tu le crées toi-même sur GitHub avec les étapes ci-dessous (2 minutes, une seule fois). Une fois la synchro activée, un bouton « Copier mon jeton » apparaît ici pour le mettre sur ton autre appareil.<br>Pas envie de jeton pour l'instant ? Utilise « Copier un lien pour mon autre appareil » plus bas.</div>
       <ol>
         <li>Touche <b>Créer mon jeton</b> ci-dessous (connecte-toi à GitHub si besoin)</li>
         <li>Expiration : choisis la plus longue (ou <b>No expiration</b>)</li>
@@ -1303,6 +1304,47 @@ async function cloudConnect() {
   render();
   await cloudSync(true);
 }
+
+/* ---------------- Lien de transfert (sans jeton) ----------------
+   Les données sont compressées et placées dans la partie « # » du lien :
+   elle n'est jamais envoyée à un serveur, elle reste sur l'appareil. */
+
+async function streamBytes(stream, bytes) {
+  const out = await new Response(new Blob([bytes]).stream().pipeThrough(stream)).arrayBuffer();
+  return new Uint8Array(out);
+}
+const toB64Url = (u8) => { let b = ''; for (let i = 0; i < u8.length; i += 0x8000) b += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000)); return btoa(b).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''); };
+const fromB64Url = (t) => Uint8Array.from(atob(t.replace(/-/g, '+').replace(/_/g, '/')), (c) => c.charCodeAt(0));
+
+async function transferLink() {
+  const gz = await streamBytes(new CompressionStream('gzip'), new TextEncoder().encode(JSON.stringify(state)));
+  return `${location.origin}${location.pathname}#import=${toB64Url(gz)}`;
+}
+
+async function copyTransferLink() {
+  if (typeof CompressionStream === 'undefined') { toast('Non disponible sur ce navigateur : utilise le fichier de sauvegarde'); return; }
+  try {
+    const link = await transferLink();
+    await navigator.clipboard.writeText(link);
+    toast('📋 Lien copié : envoie-le à ton autre appareil (AirDrop, message, note)', 5000);
+  } catch (e) { toast('Copie impossible : utilise le fichier de sauvegarde'); }
+}
+
+async function handleTransferLink() {
+  if (!location.hash.startsWith('#import=')) return;
+  const token = location.hash.slice(8);
+  history.replaceState(null, '', location.pathname + location.search);
+  try {
+    const json = new TextDecoder().decode(await streamBytes(new DecompressionStream('gzip'), fromB64Url(token)));
+    const data = JSON.parse(json);
+    if (!data || !Array.isArray(data.categories) || !Array.isArray(data.transactions)) throw new Error('format');
+    const mine = state.transactions.length + state.incomes.length + state.fixed.length;
+    confirmSheet('Recevoir les données de ton autre appareil ?',
+      `Elles contiennent ${data.transactions.length} opérations, ${data.incomes.length} revenus et ${data.fixed.length} charges.${mine ? ' <b>Les données de cet appareil seront remplacées.</b>' : ''}`,
+      'Importer', () => { replaceState(data); ui.tab = 'home'; ui.offset = 0; render(); toast('✓ Données importées'); });
+  } catch (e) { toast('Ce lien de transfert est incomplet ou abîmé. Copie-le à nouveau.', 5000); }
+}
+window.addEventListener('hashchange', handleTransferLink);
 
 function exportJSON() {
   download(`budget-sauvegarde-${todayISO()}.json`, JSON.stringify(state, null, 2), 'application/json');
@@ -1465,6 +1507,7 @@ document.addEventListener('click', (e) => {
       break;
     }
     case 'export-json': exportJSON(); break;
+    case 'copy-transfer': copyTransferLink(); break;
     case 'cloud-connect': cloudConnect(); break;
     case 'cloud-now': cloudSync(true); break;
     case 'cloud-copy-token':
@@ -1510,6 +1553,7 @@ document.addEventListener('visibilitychange', () => { if (!document.hidden && $s
 
 render();
 handleIncomingLink();
+handleTransferLink();
 cloudSync();
 
 if ('serviceWorker' in navigator && location.protocol !== 'file:') {
