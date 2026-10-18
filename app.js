@@ -5,7 +5,7 @@
    Montants en centimes (entiers) pour éviter les erreurs d'arrondi.
    ========================================================= */
 
-const APP_VERSION = '2.2';
+const APP_VERSION = '2.3';
 const STORE_KEY = 'etr-budget-v1';
 
 const DEFAULT_CATEGORIES = [
@@ -636,7 +636,7 @@ function renderBudget(p) {
     html += `<div class="list">${incomes.length ? incomes.slice().sort((a, b) => a.day - b.day).map((i) => recurringRow(i, 'income', p)).join('') : '<div class="empty">Ajoute toutes tes sources de revenus :<br>salaire, APL, bourse, prime d\'activité, job étudiant…</div>'}</div>`;
     if (!incomes.length) html += quickAdds('income', [['💼', 'Salaire'], ['🏠', 'APL'], ['🎓', 'Bourse'], ['➕', "Prime d'activité"], ['👨‍👩‍👦', 'Aide familiale']]);
     html += `<div class="small muted" style="margin:8px 4px">Comptés automatiquement chaque mois. Un revenu exceptionnel (remboursement, vente…) s'ajoute avec le bouton <b>+</b>.</div>`;
-    if (incomes.length) html += `<button class="btn secondary" style="margin-top:12px" data-action="budget-seg" data-seg="fixed">Étape suivante : charges fixes →</button>`;
+    if (incomes.length && c.fixed === 0) html += `<button class="btn secondary" style="margin-top:12px" data-action="budget-seg" data-seg="fixed">Étape suivante : charges fixes →</button>`;
   }
 
   if (seg === 'fixed') {
@@ -644,7 +644,7 @@ function renderBudget(p) {
     html += `<div class="section-title"><span>Charges de ${monthName(c.key).split(' ')[0]} · ${eur(c.fixed)}</span><button data-action="add-fixed">+ Ajouter</button></div>`;
     html += `<div class="list">${fixedList.length ? fixedList.slice().sort((a, b) => a.day - b.day).map((f) => recurringRow(f, 'fixed', p)).join('') : '<div class="empty">Tout ce qui tombe chaque mois sans que tu choisisses :<br>loyer, électricité, forfait, assurance, abonnements…</div>'}</div>`;
     if (!fixedList.length) html += quickAdds('fixed', [['🏠', 'Loyer'], ['⚡', 'Électricité'], ['📱', 'Forfait mobile'], ['🌐', 'Box internet'], ['🛡️', 'Assurance'], ['🎬', 'Abonnements']]);
-    html += `<button class="btn secondary" style="margin-top:12px" data-action="budget-seg" data-seg="goals">Étape suivante : épargne & placements →</button>`;
+    if (fixedList.length && !state.goals.length) html += `<button class="btn secondary" style="margin-top:12px" data-action="budget-seg" data-seg="goals">Étape suivante : épargne & placements →</button>`;
   }
 
   if (seg === 'goals') {
@@ -672,7 +672,7 @@ function renderBudget(p) {
       }).join('')}</div>
       <div class="small muted" style="margin:8px 4px">Touche une ligne pour enregistrer un versement ou modifier.</div>`;
     }
-    html += `<button class="btn secondary" style="margin-top:12px" data-action="budget-seg" data-seg="env">Étape suivante : enveloppes de dépenses →</button>`;
+    if (state.goals.length && c.budgeted === 0) html += `<button class="btn secondary" style="margin-top:12px" data-action="budget-seg" data-seg="env">Étape suivante : enveloppes de dépenses →</button>`;
   }
   return html;
 }
