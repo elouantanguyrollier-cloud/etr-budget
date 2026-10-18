@@ -1,18 +1,20 @@
 :root {
   color-scheme: light;
-  --page: #f6f6f3;
+  --gold: #f5c451;
+  --gold-ink: #0b1f3a;
+  --page: #f3f5f9;
   --surface: #ffffff;
-  --surface-2: #f0efec;
-  --ink: #0b0b0b;
-  --ink-2: #52514e;
-  --muted: #898781;
-  --line: #e1e0d9;
-  --border: rgba(11, 11, 11, 0.08);
-  --accent: #0f7f57;
+  --surface-2: #eceff5;
+  --ink: #0b1426;
+  --ink-2: #4a5568;
+  --muted: #7d8aa0;
+  --line: #e0e5ee;
+  --border: rgba(11, 20, 38, 0.08);
+  --accent: #17406f;
   --accent-ink: #ffffff;
-  --accent-soft: #dff3ea;
-  --bar: #2a78d6;
-  --bar-track: #ebeae5;
+  --accent-soft: #e3ebf5;
+  --bar: #2f6fbf;
+  --bar-track: #e6eaf2;
   --good: #0a7d0a;
   --good-bar: #0ca30c;
   --warn: #9a6400;
@@ -30,19 +32,19 @@
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     color-scheme: dark;
-    --page: #0d0d0d;
-    --surface: #1a1a19;
-    --surface-2: #262624;
-    --ink: #f0efec;
-    --ink-2: #c3c2b7;
-    --muted: #8f8d86;
-    --line: #2c2c2a;
+    --page: #08121f;
+    --surface: #0f1b2d;
+    --surface-2: #17263b;
+    --ink: #eaf0f8;
+    --ink-2: #b9c5d6;
+    --muted: #8393aa;
+    --line: #1c2b42;
     --border: rgba(255, 255, 255, 0.08);
-    --accent: #1baf7a;
-    --accent-ink: #04140d;
-    --accent-soft: #11352a;
-    --bar: #3987e5;
-    --bar-track: #2c2c2a;
+    --accent: #f5c451;
+    --accent-ink: #0b1f3a;
+    --accent-soft: #1a3150;
+    --bar: #6ba6f0;
+    --bar-track: #1c2b42;
     --good: #3cc23c;
     --good-bar: #0ca30c;
     --warn: #fab219;
@@ -56,19 +58,19 @@
 }
 :root[data-theme="dark"] {
   color-scheme: dark;
-  --page: #0d0d0d;
-  --surface: #1a1a19;
-  --surface-2: #262624;
-  --ink: #f0efec;
-  --ink-2: #c3c2b7;
-  --muted: #8f8d86;
-  --line: #2c2c2a;
+  --page: #08121f;
+  --surface: #0f1b2d;
+  --surface-2: #17263b;
+  --ink: #eaf0f8;
+  --ink-2: #b9c5d6;
+  --muted: #8393aa;
+  --line: #1c2b42;
   --border: rgba(255, 255, 255, 0.08);
-  --accent: #1baf7a;
-  --accent-ink: #04140d;
-  --accent-soft: #11352a;
-  --bar: #3987e5;
-  --bar-track: #2c2c2a;
+  --accent: #f5c451;
+  --accent-ink: #0b1f3a;
+  --accent-soft: #1a3150;
+  --bar: #6ba6f0;
+  --bar-track: #1c2b42;
   --good: #3cc23c;
   --good-bar: #0ca30c;
   --warn: #fab219;
@@ -249,8 +251,8 @@ button.row:active { background: var(--surface-2); }
   position: fixed; z-index: 20; right: 18px;
   bottom: calc(var(--safe-bottom) + 76px);
   width: 60px; height: 60px; border-radius: 50%;
-  background: var(--accent); color: var(--accent-ink);
-  font-size: 34px; font-weight: 300; line-height: 1;
+  background: var(--gold); color: var(--gold-ink);
+  font-size: 34px; font-weight: 400; line-height: 1;
   box-shadow: 0 6px 20px rgba(0,0,0,.25);
   display: grid; place-items: center;
 }
