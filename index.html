@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>ETR BUDGET</title>
+  <meta name="description" content="Gestion de budget mensuel : enveloppes, charges fixes, reste à vivre.">
+  <meta name="theme-color" content="#f6f6f3" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#0d0d0d" media="(prefers-color-scheme: dark)">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="ETR BUDGET">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <link rel="icon" type="image/png" href="icons/icon-192.png">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="topbar">
+    <button class="icon-btn" data-action="prev-period" aria-label="Période précédente">‹</button>
+    <div class="period">
+      <div class="period-label" id="periodLabel"></div>
+      <button class="period-today" id="periodToday" data-action="today-period" hidden>Revenir à aujourd'hui</button>
+    </div>
+    <button class="icon-btn" data-action="next-period" aria-label="Période suivante">›</button>
+  </header>
+
+  <main id="view" class="view"></main>
+
+  <button class="fab" data-action="add-tx" aria-label="Ajouter une opération">+</button>
+
+  <nav class="tabbar" aria-label="Navigation">
+    <button data-tab="home" class="active"><span class="ti">🏠</span><span>Accueil</span></button>
+    <button data-tab="ops"><span class="ti">🧾</span><span>Opérations</span></button>
+    <button data-tab="budget"><span class="ti">✉️</span><span>Budget</span></button>
+    <button data-tab="stats"><span class="ti">📊</span><span>Stats</span></button>
+    <button data-tab="settings"><span class="ti">⚙️</span><span>Réglages</span></button>
+  </nav>
+
+  <div class="sheet-backdrop" id="backdrop" hidden></div>
+  <section class="sheet" id="sheet" role="dialog" aria-modal="true" hidden></section>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <div class="tooltip" id="tooltip" hidden></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
