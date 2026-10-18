@@ -5,7 +5,7 @@
    Montants en centimes (entiers) pour éviter les erreurs d'arrondi.
    ========================================================= */
 
-const APP_VERSION = '2.1';
+const APP_VERSION = '2.2';
 const STORE_KEY = 'etr-budget-v1';
 
 const DEFAULT_CATEGORIES = [
@@ -430,12 +430,13 @@ function compute(p) {
 
 function envelopeState(cat, spent, key) {
   const budget = valueAt(cat, 'budget', key);
-  const left = budget - spent;
-  const ratio = budget > 0 ? spent / budget : (spent > 0 ? 2 : 0);
+  let left = budget - spent;
+  if (budget > 0 && Math.abs(left) < 10) left = 0; // moins de 10 centimes = enveloppe à 0,00 €
+  const ratio = budget > 0 ? (left === 0 ? 1 : spent / budget) : (spent > 0 ? 2 : 0);
   let level = 'good';
   if (budget > 0 || spent > 0) {
-    if (ratio > 1) level = 'crit';
-    else if (ratio >= 0.8) level = 'warn';
+    if (ratio >= 1) level = 'crit';       // pleine ou dépassée : rouge
+    else if (ratio >= 0.8) level = 'warn'; // bientôt pleine : orange
   }
   return { budget, spent, left, ratio, level };
 }
@@ -524,7 +525,7 @@ function renderHome(p) {
   const alerts = [];
   for (const cat of state.categories) {
     const e = envelopeState(cat, c.byCat[cat.id] || 0, c.key);
-    if (e.level === 'crit' && e.spent > 0) alerts.push({ sev: 0, html: `<div class="alert crit"><span class="ai">🚨</span><div><b>${esc(cat.emoji)} ${esc(cat.name)}</b> : dépassé de <b class="num">${eur(-e.left)}</b></div></div>` });
+    if (e.level === 'crit' && e.spent > 0) alerts.push({ sev: 0, html: `<div class="alert crit"><span class="ai">🚨</span><div><b>${esc(cat.emoji)} ${esc(cat.name)}</b> : ${e.left < 0 ? `dépassé de <b class="num">${eur(-e.left)}</b>` : 'enveloppe vide, <b class="num">0,00 €</b>'}</div></div>` });
     else if (e.level === 'warn') alerts.push({ sev: 3, html: `<div class="alert warn"><span class="ai">⚠️</span><div><b>${esc(cat.emoji)} ${esc(cat.name)}</b> : plus que <b class="num">${eur(e.left)}</b></div></div>` });
   }
   const toReview = c.txs.filter((t) => t.review).length;
@@ -946,7 +947,8 @@ function txSheet(tx) {
     const spent = compute(p).byCat[id] || 0;
     const editingSame = editing && tx.type === 'expense' && tx.categoryId === id && tx.date >= p.startISO ? tx.amount : 0;
     const b = valueAt(cat, 'budget', monthKey(p));
-    const left = b - spent + editingSame;
+    let left = b - spent + editingSame;
+    if (b > 0 && Math.abs(left) < 10) left = 0;
     document.getElementById('catHint').textContent = b ? `Il reste ${eur(left)} dans ${cat.name} ce mois-ci` : '';
   };
   hint();
@@ -975,6 +977,7 @@ function feedbackAfterExpense(tx) {
   const cat = catById(tx.categoryId);
   const e = envelopeState(cat, c.byCat[cat.id] || 0, c.key);
   if (e.budget > 0 && e.left < 0) toast(`🚨 ${cat.name} dépassé de ${eur(-e.left)}`, 4000);
+  else if (e.budget > 0 && e.left === 0) toast(`🔴 ${cat.name} : enveloppe vide, 0,00 € restant`, 4000);
   else if (e.level === 'warn') toast(`⚠️ Plus que ${eur(e.left)} dans ${cat.name}`, 3500);
   else if (c.left < 0) toast(`🚨 Budget du mois dépassé de ${eur(-c.left)}`, 4000);
   else toast(`✓ ${eur(tx.amount)} · reste ${eur(Math.floor(c.left / Math.max(1, c.daysLeft)))}/jour`);
