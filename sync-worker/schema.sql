@@ -1,0 +1,6 @@
+CREATE TABLE IF NOT EXISTS sync (
+  id TEXT PRIMARY KEY,
+  rev INTEGER NOT NULL,
+  data TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);

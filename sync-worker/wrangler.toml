@@ -1,0 +1,8 @@
+name = "etr-budget-sync"
+main = "worker.js"
+compatibility_date = "2026-10-01"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "etr-budget-sync"
+database_id = "9eb25bc1-f457-4357-bd9d-f4f0685d2963"

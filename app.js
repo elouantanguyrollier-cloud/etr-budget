@@ -5,7 +5,7 @@
    Montants en centimes (entiers) pour éviter les erreurs d'arrondi.
    ========================================================= */
 
-const APP_VERSION = '1.5';
+const APP_VERSION = '1.6';
 const STORE_KEY = 'etr-budget-v1';
 
 const DEFAULT_CATEGORIES = [
@@ -73,7 +73,6 @@ function save() {
 
 const SNAP_KEY = 'etr-budget-snapshots';
 const CLOUD_KEY = 'etr-budget-cloud'; // jeton + état, jamais inclus dans les sauvegardes
-const CLOUD_FILE = 'sauvegarde.json';
 
 function readJSON(k, fallback) {
   try { return JSON.parse(localStorage.getItem(k)) ?? fallback; } catch (e) { return fallback; }
@@ -91,12 +90,15 @@ function snapshotDaily() {
   writeJSON(SNAP_KEY, snaps.slice(0, 30));
 }
 
+// Serveur de synchro (Cloudflare Worker). Il ne stocke que des données chiffrées par l'appli.
+const SYNC_URL = 'https://etr-budget-sync.elouantanguyrollier.workers.dev';
+
 let cloud = readJSON(CLOUD_KEY, {});
 let cloudTimer;
 let cloudBusy = false;
 
 const saveCloud = () => writeJSON(CLOUD_KEY, cloud);
-const cloudReady = () => !!(cloud.token && cloud.repo);
+const cloudReady = () => !!cloud.code;
 const isEmptyState = (s) => !s.transactions.length && !s.incomes.length && !s.fixed.length && !s.goals.length;
 
 function scheduleCloudBackup() {
@@ -120,31 +122,44 @@ function replaceState(data) {
   save();
 }
 
-function b64encode(str) {
-  const bytes = new TextEncoder().encode(str);
-  let bin = '';
-  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
-  return btoa(bin);
-}
-function b64decode(b64) {
-  const bin = atob(b64.replace(/\s/g, ''));
-  return new TextDecoder().decode(Uint8Array.from(bin, (ch) => ch.charCodeAt(0)));
-}
+/* Chiffrement de bout en bout : le code de synchro (secret, 256 bits) ne quitte jamais
+   les appareils. Le serveur reçoit seulement une empreinte (identifiant) et des données chiffrées. */
+const utf8 = new TextEncoder();
+const hex = (buf) => [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('');
+const sha256 = (txt) => crypto.subtle.digest('SHA-256', utf8.encode(txt));
+const syncId = async (code) => hex(await sha256('etr-budget-id:' + code));
+const aesKey = async (code) => crypto.subtle.importKey('raw', await sha256('etr-budget-key:' + code), 'AES-GCM', false, ['encrypt', 'decrypt']);
 
-async function gh(path, opts = {}) {
-  return fetch(`https://api.github.com/repos/${cloud.repo}/contents/${path}`, {
-    ...opts,
-    headers: { Authorization: `Bearer ${cloud.token}`, Accept: 'application/vnd.github+json', ...(opts.headers || {}) },
-    cache: 'no-store',
-  });
+function bytesToB64(u8) { let b = ''; for (let i = 0; i < u8.length; i += 0x8000) b += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000)); return btoa(b); }
+const b64ToBytes = (t) => Uint8Array.from(atob(t), (c) => c.charCodeAt(0));
+
+async function encryptState(obj, code) {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, await aesKey(code), utf8.encode(JSON.stringify(obj))));
+  const out = new Uint8Array(12 + ct.length); out.set(iv); out.set(ct, 12);
+  return bytesToB64(out);
+}
+async function decryptState(b64, code) {
+  const all = b64ToBytes(b64);
+  const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: all.slice(0, 12) }, await aesKey(code), all.slice(12));
+  return JSON.parse(new TextDecoder().decode(plain));
 }
 
 async function readRemote() {
-  const r = await gh(CLOUD_FILE);
+  const r = await fetch(`${SYNC_URL}/v1/${await syncId(cloud.code)}`, { cache: 'no-store' });
   if (r.status === 404) return { sha: null, data: null };
   if (!r.ok) throw r;
   const f = await r.json();
-  return { sha: f.sha, data: JSON.parse(b64decode(f.content)) };
+  return { sha: String(f.rev), data: await decryptState(f.data, cloud.code) };
+}
+
+async function writeRemote(rev) {
+  const r = await fetch(`${SYNC_URL}/v1/${await syncId(cloud.code)}`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' }, cache: 'no-store',
+    body: JSON.stringify({ rev: rev ? Number(rev) : 0, data: await encryptState(state, cloud.code) }),
+  });
+  if (r.ok) return { ok: true, sha: String((await r.json()).rev) };
+  return { ok: false, status: r.status };
 }
 
 /* Fusion de deux versions (iPhone + ordinateur modifiés entre deux synchros).
@@ -193,15 +208,13 @@ async function cloudSync(manual = false) {
 
       // 2. Envoyer nos changements
       if (!cloud.dirty && !cloud.force && remote.data) break;
-      const body = { message: `Sauvegarde ${new Date().toLocaleString('fr-FR')}`, content: b64encode(JSON.stringify(state, null, 1)) };
-      if (cloud.sha) body.sha = cloud.sha;
-      const r = await gh(CLOUD_FILE, { method: 'PUT', body: JSON.stringify(body) });
+      const r = await writeRemote(cloud.sha);
       if (r.ok) {
-        cloud.sha = (await r.json()).content.sha;
+        cloud.sha = r.sha;
         cloud.dirty = false; cloud.force = false;
         break;
       }
-      if (r.status === 409 || r.status === 422) continue; // un autre appareil vient d'écrire : on recommence
+      if (r.status === 409) continue; // un autre appareil vient d'écrire : on recommence
       throw r;
     }
     cloud.last = new Date().toISOString();
@@ -210,7 +223,7 @@ async function cloudSync(manual = false) {
     if (received) { render(); toast('🔄 Synchronisé avec ton autre appareil'); }
     else if (manual) toast('☁️ Synchronisé');
   } catch (e) {
-    cloud.status = e && (e.status === 401 || e.status === 403) ? 'auth' : e && e.status === 404 ? 'repo' : 'error';
+    cloud.status = 'error';
     saveCloud();
     if (manual) toast(cloudStatusText());
   } finally {
@@ -235,8 +248,6 @@ function cloudStatusText() {
   if (!cloudReady()) return 'Non activée';
   switch (cloud.status) {
     case 'ok': return `✓ Synchronisé ${timeAgo(cloud.last)}`;
-    case 'auth': return '⚠️ Jeton refusé ou expiré : recrée-en un';
-    case 'repo': return '⚠️ Dépôt introuvable : vérifie son nom';
     case 'offline': return 'Hors ligne : envoi dès le retour du réseau';
     case 'error': return '⚠️ Échec du dernier envoi, nouvel essai bientôt';
     default: return 'En attente du premier envoi…';
@@ -857,7 +868,7 @@ function renderSettings() {
       <div class="input small num" style="margin-top:10px;overflow-wrap:anywhere;word-break:break-all;user-select:all;-webkit-user-select:all">${esc(autoUrl())}</div>
       <button class="btn secondary" style="margin-top:8px" data-action="copy-url" data-url="${esc(autoUrl())}">Copier le lien</button>
       <div style="margin-top:14px"><b>③ Où s'ouvre la dépense ?</b></div>
-      <div class="hint">Raccourcis ouvre le lien dans <b>Safari</b>, pas dans l'icône plein écran, et les deux ont des données séparées. Pour que tout soit au même endroit : active la <b>synchro</b> (plus haut) <b>dans l'icône ET dans Safari</b> avec le même jeton. Ensuite chaque dépense reçue dans Safari arrive dans l'icône en moins d'une minute.</div>
+      <div class="hint">Raccourcis ouvre le lien dans <b>Safari</b>, pas dans l'icône plein écran, et les deux ont des données séparées. Pour que tout soit au même endroit : active la <b>synchro</b> (plus haut) <b>dans l'icône ET dans Safari</b> avec le même lien de synchro. Ensuite chaque dépense reçue dans Safari arrive dans l'icône en moins d'une minute.</div>
       <div class="hint" style="margin-top:10px">Seuls les paiements <b>Apple Pay</b> sont captés (iPhone ou Apple Watch). La carte physique, les retraits et les prélèvements s'ajoutent avec le bouton <b>+</b>. Apple signale que ce déclencheur est parfois capricieux : vérifie avec un petit achat.</div>
     </div>
 
@@ -1252,58 +1263,52 @@ function download(name, content, type) {
   setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
 }
 
+function syncLink() { return `${location.origin}${location.pathname}#sync=${cloud.code}`; }
+
 function cloudSettings() {
   if (!cloudReady()) {
     return `<div class="card help">
-      Tes données sont envoyées toutes seules dans ton dépôt GitHub <b>privé</b> (personne d'autre ne peut le voir) et <b>synchronisées entre ton iPhone et ton ordinateur</b>. Même si un appareil efface ses données, tu récupères tout.
-      <div class="hint" style="margin-top:6px"><b>Le jeton n'existe pas encore :</b> tu le crées toi-même sur GitHub avec les étapes ci-dessous (2 minutes, une seule fois). Une fois la synchro activée, un bouton « Copier mon jeton » apparaît ici pour le mettre sur ton autre appareil.<br>Pas envie de jeton pour l'instant ? Utilise « Copier un lien pour mon autre appareil » plus bas.</div>
-      <ol>
-        <li>Touche <b>Créer mon jeton</b> ci-dessous (connecte-toi à GitHub si besoin)</li>
-        <li>Expiration : choisis la plus longue (ou <b>No expiration</b>)</li>
-        <li>Repository access : <b>Only select repositories</b> → <b>etr-budget-data</b></li>
-        <li>Permissions → Repository → <b>Contents</b> : <b>Read and write</b></li>
-        <li><b>Generate token</b>, copie-le et colle-le ici</li>
-      </ol>
-      <a class="btn secondary" style="margin-top:10px;text-decoration:none" target="_blank" rel="noopener"
-         href="https://github.com/settings/personal-access-tokens/new?name=ETR%20BUDGET%20sauvegarde&description=Sauvegarde%20auto%20ETR%20BUDGET&target_name=${encodeURIComponent(DEFAULT_REPO.split('/')[0])}&contents=write">🔑 Créer mon jeton</a>
-      <div class="field" style="margin-top:12px"><label>Dépôt privé</label><input class="input" id="cloudRepo" value="${esc(DEFAULT_REPO)}" autocapitalize="off" autocorrect="off" spellcheck="false"></div>
-      <div class="field"><label>Jeton</label><input class="input" id="cloudToken" type="password" placeholder="github_pat_…" autocapitalize="off" autocorrect="off" spellcheck="false"></div>
-      <button class="btn" data-action="cloud-connect">Activer la synchro</button>
+      Tes données sont <b>chiffrées</b> puis synchronisées entre tous tes appareils (iPhone, ordinateur…). Personne ne peut les lire, pas même le serveur.
+      <button class="btn" style="margin-top:12px" data-action="cloud-create">Activer la synchro</button>
+      <div class="hint" style="margin-top:10px">Déjà activée sur un autre appareil ? Ouvre simplement son <b>lien de synchro</b> ici (Réglages → Copier le lien de synchro, sur l'appareil déjà connecté).</div>
     </div>`;
   }
   return `<div class="card help">
     <div style="display:flex;justify-content:space-between;gap:8px"><span>Statut</span><b style="text-align:right">${esc(cloudStatusText())}</b></div>
-    <div class="small muted" style="margin-top:4px">Dépôt privé : ${esc(cloud.repo)}</div>
     <div style="margin-top:12px">
       <button class="btn secondary" data-action="cloud-now">🔄 Synchroniser maintenant</button>
-      <button class="btn secondary" data-action="cloud-copy-token">🔑 Copier mon jeton (pour un autre appareil)</button>
+      <button class="btn secondary" data-action="cloud-copy-link">🔗 Copier le lien de synchro (pour un autre appareil)</button>
       <button class="btn secondary" data-action="cloud-restore">⤵️ Remplacer par la version du cloud</button>
       <button class="btn danger" data-action="cloud-off">Désactiver</button>
     </div>
+    <div class="hint" style="margin-top:8px">Le lien de synchro est le <b>secret</b> qui ouvre tes données : ne le partage avec personne.</div>
   </div>`;
 }
 
-const DEFAULT_REPO = 'elouantanguyrollier-cloud/etr-budget-data';
-
-async function cloudConnect() {
-  const repo = document.getElementById('cloudRepo').value.trim().replace(/^https:\/\/github\.com\//, '').replace(/\/$/, '');
-  const token = document.getElementById('cloudToken').value.trim();
-  if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) { toast('Nom de dépôt invalide (ex. pseudo/etr-budget-data)'); return; }
-  if (!token) { toast('Colle ton jeton GitHub'); return; }
-  cloud = { repo, token };
-  // Vérifie l'accès au dépôt avant d'activer
-  try {
-    const r = await fetch(`https://api.github.com/repos/${repo}`, { headers: { Authorization: `Bearer ${token}` }, cache: 'no-store' });
-    if (!r.ok) { toast(r.status === 404 ? 'Dépôt introuvable avec ce jeton' : 'Jeton refusé'); cloud = {}; return; }
-    const info = await r.json();
-    if (!info.private) { toast('⚠️ Ce dépôt est public : choisis un dépôt privé'); cloud = {}; return; }
-  } catch (e) { toast('Pas de connexion internet'); cloud = {}; return; }
-  // Appareil vide : il reprend les données du cloud. Sinon : on fusionne avec le cloud.
-  cloud.dirty = !isEmptyState(state);
+async function cloudCreate() {
+  if (typeof crypto === 'undefined' || !crypto.subtle) { toast('Navigateur non compatible avec la synchro chiffrée'); return; }
+  cloud = { code: toB64Url(crypto.getRandomValues(new Uint8Array(32))), dirty: !isEmptyState(state) };
   saveCloud();
   render();
   await cloudSync(true);
+  if (cloud.status === 'ok') toast('✓ Synchro activée. Copie le lien pour ton autre appareil.', 5000);
 }
+
+async function handleSyncLink() {
+  if (!location.hash.startsWith('#sync=')) return;
+  const code = location.hash.slice(6);
+  history.replaceState(null, '', location.pathname + location.search);
+  if (!/^[A-Za-z0-9_-]{43}$/.test(code)) { toast('Ce lien de synchro est incomplet. Copie-le à nouveau.', 5000); return; }
+  if (cloud.code === code) { toast('Cet appareil est déjà synchronisé'); return; }
+  const activate = async () => {
+    cloud = { code, dirty: !isEmptyState(state) };
+    saveCloud(); ui.tab = 'home'; render();
+    await cloudSync(true);
+  };
+  if (cloudReady()) confirmSheet('Changer de synchro ?', 'Cet appareil est déjà relié à une autre synchro. Il sera relié à celle de ce lien.', 'Changer', activate);
+  else await activate();
+}
+window.addEventListener('hashchange', handleSyncLink);
 
 /* ---------------- Lien de transfert (sans jeton) ----------------
    Les données sont compressées et placées dans la partie « # » du lien :
@@ -1508,14 +1513,14 @@ document.addEventListener('click', (e) => {
     }
     case 'export-json': exportJSON(); break;
     case 'copy-transfer': copyTransferLink(); break;
-    case 'cloud-connect': cloudConnect(); break;
+    case 'cloud-create': cloudCreate(); break;
     case 'cloud-now': cloudSync(true); break;
-    case 'cloud-copy-token':
-      navigator.clipboard.writeText(cloud.token).then(() => toast('🔑 Jeton copié : colle-le sur ton autre appareil'), () => toast('Copie impossible'));
+    case 'cloud-copy-link':
+      navigator.clipboard.writeText(syncLink()).then(() => toast('🔗 Lien copié : ouvre-le sur ton autre appareil (AirDrop, message, note)', 5000), () => toast('Copie impossible'));
       break;
     case 'cloud-restore': cloudRestore(); break;
     case 'cloud-off':
-      confirmSheet('Désactiver la sauvegarde cloud ?', 'Le jeton sera oublié sur ce téléphone. Les sauvegardes déjà envoyées restent dans ton dépôt.', 'Désactiver', () => {
+      confirmSheet('Désactiver la synchro ?', 'Cet appareil ne sera plus relié aux autres. Tes données restent ici. Pour te reconnecter, il faudra rouvrir le lien de synchro.', 'Désactiver', () => {
         cloud = {}; saveCloud(); render();
       });
       break;
@@ -1554,6 +1559,7 @@ document.addEventListener('visibilitychange', () => { if (!document.hidden && $s
 render();
 handleIncomingLink();
 handleTransferLink();
+handleSyncLink();
 cloudSync();
 
 if ('serviceWorker' in navigator && location.protocol !== 'file:') {
