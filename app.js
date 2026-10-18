@@ -5,6 +5,7 @@
    Montants en centimes (entiers) pour éviter les erreurs d'arrondi.
    ========================================================= */
 
+const APP_VERSION = '1.2';
 const STORE_KEY = 'etr-budget-v1';
 
 const DEFAULT_CATEGORIES = [
@@ -798,7 +799,7 @@ function renderSettings() {
 
     <div class="section-title">Zone sensible</div>
     <div class="list"><button class="row" data-action="reset" style="color:var(--crit);justify-content:center">Tout effacer</button></div>
-    <div class="small muted" style="text-align:center;margin-top:20px">ETR BUDGET · v1.1</div>`;
+    <div class="small muted" style="text-align:center;margin-top:20px">ETR BUDGET · version ${APP_VERSION}</div>`;
 }
 
 function autoUrl() {
@@ -1425,5 +1426,34 @@ handleIncomingLink();
 if (cloud.dirty || (cloudReady() && cloud.last && Date.now() - new Date(cloud.last) > 864e5)) cloudBackup();
 
 if ('serviceWorker' in navigator && location.protocol !== 'file:') {
-  navigator.serviceWorker.register('sw.js').catch(() => {});
+  navigator.serviceWorker.register('sw.js?v=' + APP_VERSION).catch(() => {});
 }
+
+/* ---------------- Mise à jour automatique ----------------
+   Safari garde l'onglet en mémoire : à chaque retour dans l'appli,
+   on regarde si une nouvelle version est en ligne et on recharge. */
+async function checkForUpdate() {
+  if (location.protocol === 'file:' || !navigator.onLine) return;
+  try {
+    const r = await fetch(`version.json?t=${Date.now()}`, { cache: 'no-store' });
+    if (!r.ok) return;
+    const { version } = await r.json();
+    if (version && version !== APP_VERSION) {
+      if (!$sheet.hidden) return; // ne pas couper une saisie en cours
+      // Un seul essai par version et par session, pour ne jamais recharger en boucle
+      if (sessionStorage.getItem('etr-tried') === version) return;
+      sessionStorage.setItem('etr-tried', version);
+      const reg = navigator.serviceWorker && await navigator.serviceWorker.getRegistration();
+      if (reg) await reg.update().catch(() => {});
+      if (cloud.dirty) await cloudBackup();
+      sessionStorage.setItem('etr-updated', version);
+      location.reload();
+    }
+  } catch (e) { /* hors ligne : on réessaiera */ }
+}
+document.addEventListener('visibilitychange', () => { if (!document.hidden) checkForUpdate(); });
+checkForUpdate();
+try {
+  const v = sessionStorage.getItem('etr-updated');
+  if (v) { sessionStorage.removeItem('etr-updated'); setTimeout(() => toast(`✨ Appli mise à jour (version ${v})`, 3500), 400); }
+} catch (e) { /* stockage de session indisponible */ }
