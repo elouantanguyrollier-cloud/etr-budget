@@ -5,7 +5,7 @@
    Montants en centimes (entiers) pour éviter les erreurs d'arrondi.
    ========================================================= */
 
-const APP_VERSION = '2.3';
+const APP_VERSION = '2.4';
 const STORE_KEY = 'etr-budget-v1';
 
 const DEFAULT_CATEGORIES = [
