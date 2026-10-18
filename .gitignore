@@ -3,3 +3,5 @@
 budget-sauvegarde-*.json
 budget-operations-*.csv
 text.txt
+.wrangler/
+node_modules/
