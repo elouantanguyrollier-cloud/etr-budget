@@ -7,3 +7,4 @@ text.txt
 node_modules/
 raccourci/*.shortcut
 *.csv
+*.shortcut.html
