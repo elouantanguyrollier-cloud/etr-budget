@@ -5,7 +5,7 @@
    Montants en centimes (entiers) pour éviter les erreurs d'arrondi.
    ========================================================= */
 
-const APP_VERSION = '2.6';
+const APP_VERSION = '2.7';
 const STORE_KEY = 'etr-budget-v1';
 
 const DEFAULT_CATEGORIES = [
@@ -28,10 +28,15 @@ function uid() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 }
 
+// Objectif d'épargne global (en centimes) : 10 000 € par défaut
+const DEFAULT_SAVINGS_GOAL = 1000000;
+const savingsGoal = () => (state.settings && state.settings.savingsGoal) || DEFAULT_SAVINGS_GOAL;
+const totalSaved = () => state.goals.reduce((a, g) => a + (g.saved || 0), 0);
+
 function freshState() {
   return {
     version: 1,
-    settings: { startDay: 1, theme: 'auto' },
+    settings: { startDay: 1, theme: 'auto', savingsGoal: DEFAULT_SAVINGS_GOAL },
     categories: DEFAULT_CATEGORIES.map(([emoji, name, budget]) => ({ id: uid(), emoji, name, budget })),
     incomes: [],
     fixed: [],
@@ -649,29 +654,43 @@ function renderBudget(p) {
   }
 
   if (seg === 'goals') {
-    html += `<div class="section-title"><span>Épargne de ${monthName(c.key).split(' ')[0]} · ${eur(c.saving)}</span><button data-action="add-goal">+ Ajouter</button></div>`;
+    const month = monthName(c.key).split(' ')[0];
+    const total = totalSaved();
+    const goal = savingsGoal();
+    const pct = goal > 0 ? Math.min(100, (total / goal) * 100) : 0;
+    const remaining = Math.max(0, goal - total);
+    const monthsLeft = c.saving > 0 && remaining > 0 ? Math.ceil(remaining / c.saving) : null;
+    // Total de tous les comptes + objectif global
+    html += `<div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:baseline;gap:10px">
+        <span class="hero-label">Épargne totale</span>
+        <button class="link-btn" style="margin:0;padding:0" data-action="edit-savings-goal">Objectif : ${eur(goal)} ✎</button>
+      </div>
+      <div class="hero-amount num" style="font-size:36px">${eur(total)}</div>
+      <div class="progress"><span style="width:${pct}%;background:var(--bar)"></span></div>
+      <div class="progress-legend"><span>${Math.round(pct)} % de l'objectif</span><span>${remaining > 0 ? `reste ${eur(remaining)}` : 'Objectif atteint 🎉'}</span></div>
+      ${monthsLeft ? `<div class="hint" style="margin-top:8px">Au rythme de ${eur(c.saving)} par mois : environ ${monthsLeft} mois.</div>` : ''}
+    </div>`;
+
+    html += `<div class="section-title"><span>Mes comptes</span><button data-action="add-goal">+ Ajouter</button></div>`;
     if (!state.goals.length) {
-      html += `<div class="list"><div class="empty">Choisis combien tu mets de côté chaque mois et où :<br>Livret A, PEA, fonds d'urgence, projet…<br>Ces sommes sont réservées <b>avant</b> de calculer ton reste à vivre.</div></div>`;
-      html += quickAdds('goal', [['🆘', "Fonds d'urgence"], ['🏦', 'Livret A'], ['📈', 'PEA'], ['💰', 'LDDS'], ['🌴', 'Vacances'], ['🚗', 'Permis / voiture']]);
+      html += `<div class="list"><div class="empty">Ajoute tes comptes d'épargne et de placement :<br>Livret A, PEA, fonds d'urgence…<br>Leur total s'affiche ci-dessus.</div></div>`;
+      html += quickAdds('goal', [['🆘', "Fonds d'urgence"], ['🏦', 'Livret A'], ['📈', 'PEA'], ['💰', 'LDDS']]);
     } else {
       html += `<div class="list">${state.goals.map((g) => {
-        const hasTarget = g.target > 0;
-        const pct = hasTarget ? Math.min(100, (g.saved / g.target) * 100) : 0;
-        const rest = Math.max(0, g.target - g.saved);
         const monthly = valueAt(g, 'monthly', c.key);
-        const months = hasTarget && monthly > 0 ? Math.ceil(rest / monthly) : null;
         const kind = g.kind === 'invest' ? 'Placement' : 'Épargne';
+        const share = total > 0 ? Math.round(((g.saved || 0) / total) * 100) : 0;
         return `<button class="env" data-action="edit-goal" data-id="${g.id}">
           <div class="env-top">
             <div class="row-icon">${esc(g.emoji || '🎯')}</div>
             <div class="env-name">${esc(g.name)} <span class="tag">${kind}</span></div>
-            <div class="env-left num">${eur(g.saved)}</div>
+            <div class="env-left num">${eur(g.saved || 0)}</div>
           </div>
-          ${hasTarget ? `<div class="progress"><span style="width:${pct}%;background:var(--bar)"></span></div>` : ''}
-          <div class="env-meta"><span>${eur(monthly)} en ${monthName(c.key).split(' ')[0]}${isOverridden(g, 'monthly', c.key) ? ' <span class="tag">ce mois-ci</span>' : ''}</span><span>${hasTarget ? (rest === 0 ? 'Objectif atteint 🎉' : `${Math.round(pct)} % de ${eur(g.target)}${months ? ` · ~${months} mois` : ''}`) : 'sans objectif'}</span></div>
+          <div class="env-meta"><span>${eur(monthly)} mis de côté en ${month}${isOverridden(g, 'monthly', c.key) ? ' <span class="tag">ce mois-ci</span>' : ''}</span><span>${share} % du total</span></div>
         </button>`;
       }).join('')}</div>
-      <div class="small muted" style="margin:8px 4px">Touche une ligne pour enregistrer un versement ou modifier.</div>`;
+      <div class="small muted" style="margin:8px 4px">Touche un compte pour enregistrer un versement ou le modifier. Les sommes mises de côté (${eur(c.saving)} en ${month}) sont retirées de ton reste à vivre.</div>`;
     }
     if (state.goals.length && c.budgeted === 0) html += `<button class="btn secondary" style="margin-top:12px" data-action="budget-seg" data-seg="env">Étape suivante : enveloppes de dépenses →</button>`;
   }
@@ -1050,9 +1069,23 @@ function catSheet(cat) {
   });
 }
 
+function savingsGoalSheet() {
+  openSheet('Objectif d\'épargne', `
+    <div class="field"><label>Objectif global, tous comptes confondus</label>
+      <input class="input amount-input num" name="goal" inputmode="decimal" value="${toInput(savingsGoal())}" placeholder="10 000" autofocus></div>
+    <div class="hint" style="margin:-4px 0 14px">Il se compare au total de tous tes comptes d'épargne.</div>
+    <button class="btn" type="submit">Enregistrer</button>`, (fd, f) => {
+    const v = parseAmount(fd.get('goal'));
+    if (!(v > 0)) return invalid(f, 'goal', 'Entre un montant');
+    state.settings.savingsGoal = v;
+    save(); render();
+    toast(`Objectif : ${eur(v)}`);
+  });
+}
+
 function goalSheet(goal, preset) {
   const editing = !!goal;
-  const g = goal || Object.assign({ emoji: '🎯', name: '', target: 0, saved: 0, monthly: 0, kind: 'epargne' }, preset);
+  const g = goal || Object.assign({ emoji: '🎯', name: '', saved: 0, monthly: 0, kind: 'epargne' }, preset);
   const key = monthKey(periodFor(ui.offset));
   const current = editing ? valueAt(goal, 'monthly', key) : g.monthly;
   const body = `
@@ -1071,25 +1104,20 @@ function goalSheet(goal, preset) {
         <option value="epargne" ${g.kind !== 'invest' ? 'selected' : ''}>Épargne (livret, fonds d'urgence, projet)</option>
         <option value="invest" ${g.kind === 'invest' ? 'selected' : ''}>Placement (PEA, assurance-vie, crypto…)</option>
       </select></div>
-    <div class="field-row">
-      <div class="field"><label>Objectif (facultatif)</label><input class="input num" name="target" inputmode="decimal" value="${toInput(g.target)}" placeholder="aucun"></div>
-      <div class="field"><label>Montant actuel</label><input class="input num" name="saved" inputmode="decimal" value="${toInput(g.saved)}" placeholder="0,00"></div>
-    </div>
+    <div class="field"><label>Montant actuel sur ce compte</label><input class="input num" name="saved" inputmode="decimal" value="${toInput(g.saved)}" placeholder="0,00"></div>
     <div class="field"><label>Mettre de côté en ${monthName(key).split(' ')[0]}</label><input class="input num" name="monthly" inputmode="decimal" value="${toInput(current)}" placeholder="0,00" ${preset ? 'autofocus' : ''}>
       <div class="hint">Ce montant est retiré de ton reste à vivre pour être sûr de le garder.</div></div>
     ${editing ? scopeField(key) : ''}
-    <button class="btn ${editing ? 'secondary' : ''}" type="submit">${editing ? 'Enregistrer les modifications' : 'Créer l\'objectif'}</button>
-    ${editing ? `<button class="btn danger" type="button" data-action="delete-goal" data-id="${g.id}">Supprimer l'objectif</button>` : ''}`;
-  openSheet(editing ? `${esc(g.emoji)} ${esc(g.name)}` : 'Nouvel objectif', body, (fd, f) => {
+    <button class="btn ${editing ? 'secondary' : ''}" type="submit">${editing ? 'Enregistrer les modifications' : 'Ajouter le compte'}</button>
+    ${editing ? `<button class="btn danger" type="button" data-action="delete-goal" data-id="${g.id}">Supprimer le compte</button>` : ''}`;
+  openSheet(editing ? `${esc(g.emoji)} ${esc(g.name)}` : 'Nouveau compte', body, (fd, f) => {
     const name = fd.get('name').trim();
     if (!name) return invalid(f, 'name', 'Donne-lui un nom');
-    const target = fd.get('target').trim() ? parseAmount(fd.get('target')) : 0;
     const saved = fd.get('saved').trim() ? parseAmount(fd.get('saved')) : 0;
     const monthly = fd.get('monthly').trim() ? parseAmount(fd.get('monthly')) : 0;
-    if (Number.isNaN(target)) return invalid(f, 'target', 'Montant invalide');
     if (Number.isNaN(saved)) return invalid(f, 'saved', 'Montant invalide');
     if (Number.isNaN(monthly)) return invalid(f, 'monthly', 'Montant invalide');
-    const data = { name, kind: fd.get('kind'), target: Math.max(0, target), saved: Math.max(0, saved), emoji: fd.get('emoji').trim() || '🎯' };
+    const data = { name, kind: fd.get('kind'), saved: Math.max(0, saved), emoji: fd.get('emoji').trim() || '🎯' };
     if (editing) {
       Object.assign(goal, data);
       if (monthly !== current) setValueAt(goal, 'monthly', key, Math.max(0, monthly), fd.get('scope'));
@@ -1695,6 +1723,7 @@ document.addEventListener('click', (e) => {
       break;
     }
     case 'add-goal': goalSheet(); break;
+    case 'edit-savings-goal': savingsGoalSheet(); break;
     case 'quick-income': recurringSheet('income', null, { name: el.dataset.name, emoji: el.dataset.emoji }); break;
     case 'quick-fixed': recurringSheet('fixed', null, { name: el.dataset.name, emoji: el.dataset.emoji }); break;
     case 'quick-goal': goalSheet(null, { name: el.dataset.name, emoji: el.dataset.emoji, kind: /PEA/.test(el.dataset.name) ? 'invest' : 'epargne' }); break;
@@ -1710,9 +1739,11 @@ document.addEventListener('click', (e) => {
       const g = find(state.goals, id);
       const amt = parseAmount(document.querySelector('[name="deposit"]').value);
       if (Number.isNaN(amt) || amt === 0) { toast('Entre un montant'); break; }
-      g.saved = Math.max(0, g.saved + amt);
+      const before = totalSaved();
+      g.saved = Math.max(0, (g.saved || 0) + amt);
+      const after = totalSaved();
       save(); closeSheet(); render();
-      toast(g.target > 0 && g.saved >= g.target ? `🎉 Objectif ${g.name} atteint !` : `${amt > 0 ? '+' : ''}${eur(amt)} · ${eur(g.saved)} épargnés`);
+      toast(before < savingsGoal() && after >= savingsGoal() ? `🎉 Objectif d'épargne de ${eur(savingsGoal())} atteint !` : `${amt > 0 ? '+' : ''}${eur(amt)} · épargne totale ${eur(after)}`, 4000);
       break;
     }
     case 'export-json': exportJSON(); break;
