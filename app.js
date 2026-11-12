@@ -5,7 +5,7 @@
    Montants en centimes (entiers) pour éviter les erreurs d'arrondi.
    ========================================================= */
 
-const APP_VERSION = '2.7';
+const APP_VERSION = '2.8';
 const STORE_KEY = 'etr-budget-v1';
 
 const DEFAULT_CATEGORIES = [
@@ -763,16 +763,25 @@ function renderStats(p) {
   }
   html += `</div>`;
 
-  // Chiffres clés
+  // Rythme et solde estimé de fin de mois
   const elapsed = c.status === 'current' ? c.totalDays - c.daysLeft + 1 : c.totalDays;
   const avg = elapsed > 0 ? Math.round(c.spent / elapsed) : 0;
   const projected = c.status === 'current' ? avg * c.totalDays : c.spent;
+  const endBalance = c.available - projected; // ce qu'il resterait en fin de mois en gardant ce rythme
+  const signed = (v) => `${v < 0 ? '−' : '+'}${eur(Math.abs(v))}`;
+  const canProject = c.status === 'current' && c.income > 0 && c.spent > 0;
   html += `<div class="section-title">Rythme</div><div class="stat-grid">
     <div class="kpi"><div class="kpi-label">Moyenne / jour</div><div class="kpi-value num">${eur(avg)}</div></div>
-    <div class="kpi"><div class="kpi-label">${c.status === 'current' ? 'Projection fin de mois' : 'Total dépensé'}</div><div class="kpi-value num" style="color:${projected > c.available ? 'var(--crit)' : 'inherit'}">${eurShort(projected)}</div></div>
+    ${canProject
+      ? `<div class="kpi"><div class="kpi-label">Fin de mois estimée</div><div class="kpi-value num" style="color:${endBalance < 0 ? 'var(--crit)' : 'var(--good)'}">${signed(endBalance)}</div></div>`
+      : `<div class="kpi"><div class="kpi-label">${c.status === 'current' ? 'Projection fin de mois' : 'Total dépensé'}</div><div class="kpi-value num">${eurShort(projected)}</div></div>`}
   </div>`;
-  if (c.status === 'current' && projected > c.available && c.spent > 0) {
-    html += `<div class="alert warn" style="margin-top:8px"><span class="ai">📈</span><div>À ce rythme tu dépasserais de <b class="num">${eur(projected - c.available)}</b> en fin de mois. Vise <b class="num">${eur(Math.max(0, Math.floor(c.left / Math.max(1, c.daysLeft))))}</b>/jour.</div></div>`;
+  if (canProject) {
+    const perDayLeft = c.left > 0 ? Math.floor(c.left / Math.max(1, c.daysLeft)) : 0;
+    const early = elapsed < 4 ? `<div class="hint" style="margin-top:6px">Estimation encore peu fiable en début de mois : elle se précise avec les jours.</div>` : '';
+    html += endBalance < 0
+      ? `<div class="alert crit" style="margin-top:8px"><span class="ai">📉</span><div>À ce rythme, tu finiras le mois à <b class="num">${signed(endBalance)}</b>.<br>Pour rester dans ton budget, vise <b class="num">${eur(perDayLeft)}</b> par jour d'ici la fin du mois.${early}</div></div>`
+      : `<div class="alert good" style="margin-top:8px"><span class="ai">📈</span><div>À ce rythme, tu finiras le mois à <b class="num">${signed(endBalance)}</b>. 👍<br>Tu peux dépenser jusqu'à <b class="num">${eur(perDayLeft)}</b> par jour sans dépasser ton budget.${early}</div></div>`;
   }
 
   // Historique 6 périodes
