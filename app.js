@@ -5,7 +5,7 @@
    Montants en centimes (entiers) pour éviter les erreurs d'arrondi.
    ========================================================= */
 
-const APP_VERSION = '2.8';
+const APP_VERSION = '2.9';
 const STORE_KEY = 'etr-budget-v1';
 
 const DEFAULT_CATEGORIES = [
@@ -20,7 +20,7 @@ const DEFAULT_CATEGORIES = [
 ];
 
 let state;
-let ui = { tab: 'home', offset: 0, opsFilter: 'all', budgetSeg: 'income', allAlerts: false, open: {} };
+let ui = { tab: 'home', offset: 0, opsFilter: 'all', budgetSeg: 'income', allAlerts: false, allMerchants: false, open: {} };
 
 /* ---------------- Stockage ---------------- */
 
@@ -741,6 +741,77 @@ function recurringRow(item, kind, p) {
   </button>`;
 }
 
+/* ---------------- Classement par commerçant ----------------
+   Regroupe les noms proches (« Lild » → Lidl, « Wina » → Winamax, « McDo » → McDonald's)
+   pour additionner ce qui est dépensé au même endroit. */
+
+const GENERIC_WORDS = new Set(['le', 'la', 'les', 'l', 'de', 'du', 'des', 'd', 'chez', 'au', 'aux', 'sarl', 'sas', 'sa',
+  'boulangerie', 'restaurant', 'resto', 'bar', 'cafe', 'brasserie', 'pharmacie', 'tabac', 'pizzeria', 'snack', 'super', 'supermarche', 'station']);
+
+// Mot qui identifie le commerçant : le premier mot « utile » du libellé
+function merchantToken(name) {
+  const words = normTxt(name).replace(/[^a-z0-9]+/g, ' ').split(' ').filter(Boolean);
+  const useful = words.filter((w) => w.length >= 2 && !/^\d+$/.test(w) && !GENERIC_WORDS.has(w));
+  return useful[0] || words.find((w) => !/^\d+$/.test(w)) || words[0] || '';
+}
+
+// Distance d'édition où une lettre inversée compte pour une seule faute (lild ↔ lidl)
+function typoDistance(a, b) {
+  const d = Array.from({ length: a.length + 1 }, (_, i) => [i]);
+  for (let j = 1; j <= b.length; j++) d[0][j] = j;
+  for (let i = 1; i <= a.length; i++) {
+    for (let j = 1; j <= b.length; j++) {
+      d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+      if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) d[i][j] = Math.min(d[i][j], d[i - 2][j - 2] + 1);
+    }
+  }
+  return d[a.length][b.length];
+}
+
+function sameMerchant(a, b) {
+  if (!a || !b) return false;
+  if (a === b) return true;
+  const [short, long] = a.length <= b.length ? [a, b] : [b, a];
+  if (short.length >= 3 && short.length >= long.length * 0.5 && long.startsWith(short)) return true; // abréviation : wina → winamax
+  const n = Math.min(a.length, b.length);
+  const tolerance = n <= 3 ? 0 : n <= 5 ? 1 : n <= 8 ? 2 : 3;
+  return tolerance > 0 && Math.abs(a.length - b.length) <= tolerance && typoDistance(a, b) <= tolerance;
+}
+
+function groupMerchants(txs) {
+  const names = new Map();
+  for (const t of txs) {
+    const raw = (t.note || '').trim() || catById(t.categoryId).name;
+    const k = normTxt(raw);
+    const e = names.get(k) || { raw, n: 0, total: 0, tok: merchantToken(raw) };
+    e.n++; e.total += t.amount;
+    names.set(k, e);
+  }
+  // Les noms les plus fréquents servent de référence aux variantes
+  const items = [...names.values()].sort((x, y) => y.n - x.n || y.total - x.total);
+  const groups = [];
+  for (const it of items) {
+    const g = groups.find((x) => sameMerchant(it.tok, x.tok));
+    if (g) {
+      g.n += it.n; g.total += it.total; g.members.push(it);
+      if (it.tok.length > g.tok.length && it.tok.startsWith(g.tok)) g.tok = it.tok;
+    } else groups.push({ tok: it.tok, n: it.n, total: it.total, members: [it] });
+  }
+  for (const g of groups) {
+    const dropNumbers = (raw) => raw.split(/\s+/).filter((w) => !/^[x*]*\d{2,}$/i.test(w)).join(' ');
+    const byFreq = g.members.slice().sort((x, y) => y.n - x.n || y.raw.length - x.raw.length);
+    if (g.members.length === 1) { g.name = prettyMerchant(dropNumbers(byFreq[0].raw)); continue; }
+    // Plusieurs écritures : on affiche le mot qui identifie le commerçant (« Lidl »), sans ville ni numéro
+    let word = null;
+    for (const m of byFreq) {
+      word = m.raw.split(/\s+/).find((w) => normTxt(w).replace(/[^a-z0-9]+/g, ' ').trim().split(' ')[0] === g.tok);
+      if (word) break;
+    }
+    g.name = prettyMerchant(word ? word.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, '') : dropNumbers(byFreq[0].raw));
+  }
+  return groups.sort((x, y) => y.total - x.total);
+}
+
 function renderStats(p) {
   const c = compute(p);
   let html = '';
@@ -762,6 +833,21 @@ function renderStats(p) {
     }).join('');
   }
   html += `</div>`;
+
+  // Où part l'argent : classement par commerçant, noms proches regroupés
+  if (c.spent > 0) {
+    const merchants = groupMerchants(c.txs.filter((t) => t.type === 'expense'));
+    const shown = ui.allMerchants ? merchants : merchants.slice(0, 8);
+    const top = merchants[0].total;
+    const when = ui.offset === 0 ? 'ce mois-ci' : monthName(c.key);
+    html += `<div class="section-title"><span>Où part ton argent</span><span style="text-transform:none;letter-spacing:0;font-weight:500">${when}</span></div><div class="card">`;
+    html += shown.map((g) => `<div class="hbar">
+        <div class="hbar-top"><span>${esc(g.name)} <span class="muted">· ${g.n} achat${g.n > 1 ? 's' : ''}</span></span><span class="num"><b>${eur(g.total)}</b></span></div>
+        <div class="hbar-track"><div class="hbar-fill" style="width:${top ? (g.total / top) * 100 : 0}%"></div></div>
+      </div>`).join('');
+    if (merchants.length > shown.length) html += `<button class="link-btn" data-action="show-merchants">Voir les ${merchants.length - shown.length} autres</button>`;
+    html += `<div class="hint" style="margin-top:8px">Les noms proches (Lild, Wina…) sont regroupés avec le bon commerçant.</div></div>`;
+  }
 
   // Rythme et solde estimé de fin de mois
   const elapsed = c.status === 'current' ? c.totalDays - c.daysLeft + 1 : c.totalDays;
@@ -1693,6 +1779,7 @@ document.addEventListener('click', (e) => {
       break;
     case 'close-sheet': closeSheet(); break;
     case 'show-alerts': ui.allAlerts = true; render(); break;
+    case 'show-merchants': ui.allMerchants = true; render(); break;
     case 'ops-filter': ui.opsFilter = el.dataset.f; render(); break;
     case 'review': ui.tab = 'ops'; ui.opsFilter = 'review'; render(); break;
     case 'budget-seg': ui.budgetSeg = el.dataset.seg; render(); break;
